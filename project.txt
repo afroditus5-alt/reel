@@ -1852,15 +1852,51 @@ class IGClient:
             "additional_audio_info": {"has_voiceover_attribution": False},
         }
 
-        last_err = None
-        wait_sequence = [7, 12, 20, 35, 55, 80, 120, 180]
+        # ═══ WAIT-FIRST стратегия ═══
+        # Проблема: если configure_to_clips вызвать пока IG ещё транскодит —
+        # IG создаст draft media с caption=пусто, и повторные configure с caption
+        # УЖЕ НЕ ПРИМЕНЯТСЯ (media exists). Поэтому ждём заранее.
+
+        login = self.acc.get("login", "?")
         try:
             body_json = json.dumps(payload, separators=(",", ":"))
         except TypeError:
             body_json = json.dumps(_deep_convert(payload), separators=(",", ":"))
 
-        for wait_sec in wait_sequence:
-            await asyncio.sleep(wait_sec + random.uniform(-0.5, 1.5))
+        # оценка времени транскодирования: ~8с/MB + 15с базовых
+        video_size_mb = len(video_bytes) / 1024 / 1024
+        initial_wait = max(25, min(90, int(video_size_mb * 8) + 15))
+        print(f"[upload:{login}] жду {initial_wait}с транскодирования "
+              f"(video {video_size_mb:.1f}MB) — configure ЕЩЁ НЕ вызываю")
+        await asyncio.sleep(initial_wait + random.uniform(-2, 3))
+
+        # паттерны сообщений
+        RETRIABLE_MSG_PATTERNS = (
+            "transcode not finished", "transcoded",
+            "something went wrong", "please try again",
+            "media publish", "try again later",
+            "temporarily unavailable", "server error",
+            "unable to process", "processing",
+        )
+        FATAL_MSG_PATTERNS = (
+            "spam", "feedback_required", "action_blocked",
+            "not_allowed", "url_missing", "cannot_be_uploaded",
+            "we restrict certain", "challenge_required",
+        )
+
+        # Кэп: 4 попытки, между ними ЖИРНАЯ пауза (не мелкие 20с!)
+        # — потому что если первая не прошла, значит IG реально долго транскодит
+        extra_waits = [45, 75, 120, 180]
+        last_err = None
+        last_err_msg = ""
+
+        for attempt in range(1 + len(extra_waits)):
+            if attempt > 0:
+                extra = extra_waits[attempt - 1]
+                print(f"[upload:{login}] configure retry #{attempt}, "
+                      f"жду ещё {extra}с")
+                await asyncio.sleep(extra + random.uniform(-2, 4))
+
             try:
                 r = await self.s.request(
                     "POST", f"{self.BASE}/api/v1/media/configure_to_clips/",
@@ -1868,29 +1904,214 @@ class IGClient:
                     headers={"Content-Type":
                         "application/x-www-form-urlencoded; charset=UTF-8"})
             except Exception as e:
-                last_err = f"network: {type(e).__name__}: {str(e)[:150]}"
+                last_err_msg = f"network: {type(e).__name__}: {str(e)[:150]}"
+                last_err = last_err_msg
                 continue
 
+            if 500 <= r.status_code < 600:
+                last_err_msg = f"HTTP {r.status_code}"
+                last_err = last_err_msg
+                continue
             if not r.text or not r.text.strip():
-                last_err = f"empty response HTTP {r.status_code}"
+                last_err_msg = f"empty response HTTP {r.status_code}"
+                last_err = last_err_msg
                 continue
             try:
                 j = r.json()
             except Exception:
-                last_err = f"non-JSON HTTP {r.status_code}: {r.text[:150]}"
+                last_err_msg = f"non-JSON HTTP {r.status_code}: {r.text[:150]}"
+                last_err = last_err_msg
                 continue
 
+            # ─── УСПЕХ ───
             if j.get("status") == "ok":
+                media_obj = j.get("media") or {}
+                media_id = media_obj.get("id") or media_obj.get("pk")
+                applied_caption = (media_obj.get("caption") or {}).get("text", "") \
+                                  if media_obj.get("caption") else ""
+
+                if caption and media_id:
+                    if not applied_caption or applied_caption.strip() != caption.strip():
+                        # Caption дропнут. Ждём МНОГО и делаем edit_media правильно
+                        print(f"[upload:{login}] configure OK на попытке #{attempt+1} "
+                              f"НО caption потерян (sent={len(caption)} got={len(applied_caption)}) "
+                              f"— force через edit_media с задержкой")
+                        # ВАЖНО: 60с паузы внутри _edit_media_caption
+                        await self._edit_media_caption(str(media_id), caption,
+                                                       wait_before=60.0)
+                    else:
+                        print(f"[upload:{login}] ✓ configure OK, "
+                              f"caption применён с первого раза ({len(caption)} симв)")
                 return j
 
-            msg = j.get("message", "")
+            # ─── ошибка от IG ───
+            msg = str(j.get("message", "")).lower()
             last_err = j
-            if "Transcode not finished" in msg or "transcoded" in msg.lower():
+            last_err_msg = str(j.get("message", ""))[:200]
+
+            if any(p in msg for p in FATAL_MSG_PATTERNS):
+                raise UploadError(f"configure fatal: {j}")
+
+            if any(p in msg for p in RETRIABLE_MSG_PATTERNS):
+                print(f"[upload:{login}] configure retriable #{attempt+1}: "
+                      f"{last_err_msg[:100]}")
+                continue
+
+            if attempt < 2:
+                print(f"[upload:{login}] configure unknown #{attempt+1}: "
+                      f"{last_err_msg[:100]}")
                 continue
             raise UploadError(f"configure: {j}")
 
-        raise UploadError(f"configure failed after {sum(wait_sequence)}s: {last_err}")
+        # все попытки — recovery через feed
+        print(f"[upload:{login}] все ретраи configure провалились, "
+              f"ищу в ленте (последняя ошибка: {last_err_msg[:100]})")
+        recovered = await self._recover_caption_via_feed(caption, upload_id)
+        if recovered:
+            return recovered
 
+        raise UploadError(f"configure failed + recovery не помог: {last_err}")
+    async def _edit_media_caption(self, media_id: str, caption: str,
+                                    wait_before: float = 60.0) -> bool:
+        """
+        Force-обновляет caption у уже созданного media.
+        КРИТИЧНО: ждём wait_before секунд перед вызовом чтобы IG не ответил
+        feedback_required (рейт-лимит на edit сразу после upload).
+        """
+        if not caption or not media_id:
+            return False
+
+        login = self.acc.get("login", "?")
+        # долгая пауза — иначе feedback_required гарантирован
+        if wait_before > 0:
+            print(f"[caption-fix:{login}] жду {int(wait_before)}с перед edit_media "
+                  f"(чтобы избежать feedback_required)")
+            await asyncio.sleep(wait_before + random.uniform(-3, 5))
+
+        dev = self.s.device
+
+        # собираем uid и csrftoken из cookies — БЕЗ них IG рубит на feedback_required
+        uid = ""
+        csrf = ""
+        try:
+            for c in self.s._session.cookies.jar:
+                if c.name == "ds_user_id" and c.value:
+                    uid = c.value
+                elif c.name == "csrftoken" and c.value:
+                    csrf = c.value
+        except Exception:
+            pass
+
+        payload = {
+            "_csrftoken":       csrf,
+            "_uid":             uid,
+            "_uuid":            dev.device_id,
+            "container_module": "edit_media_info_page",
+            "device_id":        dev.android_id or dev.device_id,
+            "caption_text":     caption,
+        }
+        try:
+            body = json.dumps(payload, separators=(",", ":"))
+            r = await self.s.request(
+                "POST", f"{self.BASE}/api/v1/media/{media_id}/edit_media/",
+                data={"signed_body": f"SIGNATURE.{body}"},
+                headers={"Content-Type":
+                    "application/x-www-form-urlencoded; charset=UTF-8"})
+            try:
+                j = r.json()
+            except Exception:
+                print(f"[caption-fix:{login}] non-JSON HTTP {r.status_code}: {r.text[:150]}")
+                return False
+
+            if j.get("status") == "ok":
+                print(f"[caption-fix:{login}] ✓ caption применён через edit_media "
+                      f"(len={len(caption)})")
+                return True
+            print(f"[caption-fix:{login}] edit_media fail: {str(j)[:200]}")
+            return False
+        except Exception as e:
+            print(f"[caption-fix:{login}] edit_media exception: {e}")
+            return False
+    async def _find_recently_uploaded_media(self, user_id: str,
+                                             upload_id: str,
+                                             max_age_sec: int = 300) -> str | None:
+        """
+        Ищет только что созданный media в feed_user по времени.
+        Используется когда configure_to_clips вернул ошибку, но media реально создалась.
+        Возвращает media_id или None.
+        """
+        try:
+            r = await self.s.request(
+                "GET", f"{self.BASE}/api/v1/feed/user/{user_id}/",
+                params={"count": "6"})
+            if r.status_code != 200 or not r.text:
+                return None
+            j = r.json()
+            if j.get("status") != "ok":
+                return None
+            items = j.get("items", []) or []
+            import time as _t
+            now = _t.time()
+            for item in items:
+                taken_at = int(item.get("taken_at") or 0)
+                if now - taken_at > max_age_sec:
+                    continue
+                # ищем clips
+                is_reel = (item.get("product_type") == "clips"
+                          or item.get("media_type") == 2
+                          or "clips_metadata" in item)
+                if not is_reel:
+                    continue
+                # проверяем caption — если пустой или отличается, это наш кандидат
+                mid = item.get("id") or item.get("pk")
+                if mid:
+                    return str(mid)
+            return None
+        except Exception as e:
+            print(f"[media-find:{self.acc.get('login')}] error: {e}")
+            return None
+
+    async def _recover_caption_via_feed(self, caption: str,
+                                         upload_id: str) -> dict | None:
+        """
+        Fallback: configure_to_clips завершился ошибкой, но media могла создаться.
+        Ищем свежий рилс в ленте юзера и форсим caption.
+        Возвращает синтетический result dict {'status': 'ok', 'media': {...}} или None.
+        """
+        login = self.acc.get("login", "?")
+        # получаем uid из cookies
+        uid = None
+        try:
+            for c in self.s._session.cookies.jar:
+                if c.name == "ds_user_id" and c.value:
+                    uid = c.value
+                    break
+        except Exception:
+            pass
+        if not uid:
+            print(f"[caption-recover:{login}] no ds_user_id in cookies")
+            return None
+
+        # ждём чтобы IG успел зафиксировать media в ленте
+        await asyncio.sleep(random.uniform(8, 15))
+
+        media_id = await self._find_recently_uploaded_media(uid, upload_id)
+        if not media_id:
+            print(f"[caption-recover:{login}] media в ленте не найдено — "
+                  f"считаем что configure реально провалился")
+            return None
+
+        print(f"[caption-recover:{login}] найдено свежее media {media_id[:20]}, "
+              f"форсю caption")
+        if caption:
+            await asyncio.sleep(random.uniform(2, 4))
+            ok = await self._edit_media_caption(media_id, caption)
+            if not ok:
+                print(f"[caption-recover:{login}] edit_media провалился — "
+                      f"caption не применится, но рилс жив")
+
+        return {"status": "ok", "media": {"id": media_id, "pk": media_id},
+                "_recovered_via_feed": True}
     async def _upload_cover(self, upload_id: str, cover_path: str):
         with open(cover_path, "rb") as f:
             data = f.read()
@@ -1910,6 +2131,7 @@ class IGClient:
         if r.status_code != 200:
             print(f"[cover] upload returned {r.status_code}: {r.text[:150]}")
         await asyncio.sleep(random.uniform(1.5, 3.0))
+
 
     # ═══════════════ STATS — БЕЗОПАСНЫЙ РЕЖИМ ═══════════════
     async def get_self_stats(self, user_id: str, mode: str = "light") -> dict:
