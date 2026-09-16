@@ -428,8 +428,10 @@ IG сейчас использует 4 основных барьера:
 import asyncio, re, json, time, imaplib, email
 from email.header import decode_header
 from dataclasses import dataclass
-
+from core.errors import LoginError
+CheckpointError = LoginError
 class CheckpointError(Exception): pass
+
 class LoginError(Exception): pass
 class TwoFactorRequired(Exception): pass
 
@@ -679,8 +681,9 @@ from assets.locale_map import (LOCALE_COUNTRY, pick_timezone_for_locale,
 from assets.real_builds import REAL_BUILDS
 
 
-def _stable_uuid(seed: str, salt: str) -> str:
-    return str(uuid.UUID(hashlib.md5(f"{salt}:{seed}".encode()).hexdigest()))
+def _stable_uuid(seed: str, salt: str = "") -> str:
+    """Одинаковый UUID для одного и того же seed между запусками."""
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{salt}|{seed}"))
 
 
 def _stable_hex(seed: str, salt: str, length: int = 16) -> str:
@@ -948,7 +951,10 @@ class DeviceProfile:
         """Восстановление из БД. Все поля через .get() с дефолтами."""
         platform = acc.get("platform") or "android"
         default_ig = IG_ANDROID[0] if platform == "android" else IG_IOS[0]
-
+        pigeon_sid = (acc.get("pigeon_session_id")
+                      or f"UFS-{_stable_uuid(acc.get('login', ''), 'pigeon')}-0")
+        tz_offset = acc.get("timezone_offset")
+        tz_offset = -18000 if tz_offset is None else tz_offset
         return cls(
             platform=platform,
             seed=acc.get("login", ""),
@@ -970,6 +976,7 @@ class DeviceProfile:
             supported_abis=acc.get("supported_abis") or ["arm64-v8a"],
             radio_version=acc.get("radio_version") or "",
             resolution=acc.get("resolution") or "1080x2340",
+            pigeon_session_id=pigeon_sid,
             dpi=acc.get("dpi") or "480dpi",
             scale=acc.get("scale") or "",
             build_id=acc.get("build_id") or "",
@@ -979,7 +986,7 @@ class DeviceProfile:
             locale=acc.get("locale") or "en_US",
             language=acc.get("language") or "en",
             country=acc.get("country") or "US",
-            timezone_offset=acc.get("timezone_offset") or -18000,
+            timezone_offset=tz_offset,
             carrier_name=acc.get("carrier_name") or "",
             carrier_mcc=acc.get("carrier_mcc") or "",
             carrier_mnc=acc.get("carrier_mnc") or "",
@@ -989,12 +996,30 @@ class DeviceProfile:
             phone_id=acc.get("phone_id") or "",
             advertising_id=acc.get("advertising_id") or "",
         )
-
     # ============================================================
     def to_saved(self) -> dict:
         d = asdict(self)
         d["device_name"] = d.pop("device")
         return d
+def device_for(acc: dict) -> "DeviceProfile":
+    """Безопасный профиль: полный from_saved или генерация для cookie-акков."""
+    if acc.get("device_id") and acc.get("model") and \
+       acc.get("ig_version") and acc.get("os_release"):
+        try:
+            return DeviceProfile.from_saved(acc)
+        except Exception:
+            pass
+    return DeviceProfile.generate(
+        seed=acc.get("login", ""),
+        platform=acc.get("platform") or "ios",
+        country_hint=acc.get("country"))
+core/errors.py
+# core/errors.py
+class LoginError(Exception):
+    """Ошибка логина: включает account_suspended / checkpoint."""
+    def __init__(self, msg: str = "", kind: str = ""):
+        super().__init__(msg)
+        self.kind = kind  # "suspended" | "checkpoint" | "wrong_pass" | ...
 core/experiment_tracker.py
 """
 A/B experiment tracker.
@@ -1325,6 +1350,8 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
+from core.errors import LoginError
+
 
 
 class SuspendedError(Exception):      pass
@@ -1333,7 +1360,6 @@ class TwoFactorRequired(Exception):   pass
 class SessionExpiredError(Exception): pass
 class RateLimitError(Exception):      pass
 class TransientError(Exception):      pass
-class LoginError(Exception):          pass
 class UploadError(Exception):         pass
 
 
@@ -3098,6 +3124,26 @@ class Orchestrator:
                         "username": stats.get("username")}
 
             raise ValueError(f"unknown action: {action}")
+
+        except Exception as e:
+            # судебный лог: пишем причину смерти в БД
+            detail = f"{type(e).__name__}: {e}"[:500]
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                try:
+                    detail = (f"HTTP {resp.status_code}: "
+                              f"{str(resp.text)[:400]} | {detail}")[:500]
+                except Exception:
+                    pass
+            if self.db:
+                try:
+                    with self.db._cursor() as c:
+                        c.execute("UPDATE accounts SET last_error_detail=? "
+                                  "WHERE login=?",
+                                  (detail, acc["login"]))
+                except Exception:
+                    pass
+            raise  # пробрасываем дальше — оркестратор сам поставит статус
 
         finally:
             try:
@@ -5153,6 +5199,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
+from core.device import DeviceProfile, device_for
+
 import asyncio
 import json
 import time
@@ -5609,7 +5657,7 @@ class IOSAccountsPanel(QWidget):
                 detail = ""
 
                 try:
-                    device = DeviceProfile.from_saved(acc)
+                    device = device_for(acc)
                     cookies = acc.get("cookies")
                     if not cookies and acc.get("cookies_json"):
                         try:
@@ -7630,12 +7678,19 @@ class MainWindow(QMainWindow):
         return assigned
     def _delete_banned(self):
         rows = [r for r in range(self.table.rowCount())
-                if "banned" in (self.table.item(r, 5).text() if self.table.item(r, 5) else "")]
+                if (self.table.get_account(r).get("status") or "").lower()
+                in ("banned", "dead", "suspended")]
         self._delete_rows(rows)
-
+    def _show_death_reason(self):
+        rows = self._selected_rows()  # подставь свой метод выделенных строк
+        msgs = []
+        for r in rows:
+            acc = self.table.get_account(r)
+            msgs.append(f"{acc.get('login')}: {acc.get('last_error_detail') or '—'}")
+        QMessageBox.information(self, "Причины", "\n".join(msgs))
     def _delete_errors(self):
         rows = [r for r in range(self.table.rowCount())
-                if "error" in (self.table.item(r, 5).text() if self.table.item(r, 5) else "")]
+                if (self.table.get_account(r).get("status") or "").lower() == "error"]
         self._delete_rows(rows)
 
     def _delete_rows(self, rows):
@@ -10212,6 +10267,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QFormLayout, QSplitter, QMessageBox, QFileDialog,
     QDialog, QDialogButtonBox, QProgressBar, QApplication, QScrollArea,
 )
+from core.device import DeviceProfile, device_for
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 import asyncio
@@ -11932,7 +11988,7 @@ ORDER BY survival_pct DESC
             login = acc["login"]
             async with sem:
                 try:
-                    device = DeviceProfile.from_saved(acc)
+                    device = device_for(acc)
                     cookies = acc.get("cookies")
                     if not cookies and acc.get("cookies_json"):
                         try:
@@ -12516,7 +12572,7 @@ ORDER BY survival_pct DESC
                     return
 
                 try:
-                    device = DeviceProfile.from_saved(acc)
+                    device = device_for(acc)
                     cookies = acc.get("cookies")
                     if not cookies and acc.get("cookies_json"):
                         try:
@@ -12801,7 +12857,6 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 CREATE INDEX IF NOT EXISTS idx_status ON accounts(status);
 CREATE INDEX IF NOT EXISTS idx_batch ON accounts(import_batch);
-CREATE INDEX IF NOT EXISTS idx_avg_views ON accounts(avg_views_per_reel);
 
 CREATE TABLE IF NOT EXISTS experiments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -12904,6 +12959,7 @@ class DB:
             "carrier_name": "TEXT", "carrier_mcc": "TEXT", "carrier_mnc": "TEXT",
             "family_device_id": "TEXT", "phone_id": "TEXT",
             "bio_hash": "TEXT",
+            "last_error_detail": "TEXT",
             "bio_updated_at": "TIMESTAMP",
             "sort_order": "INTEGER",
             "import_batch": "TEXT",
@@ -12916,6 +12972,15 @@ class DB:
                         c.execute(f"ALTER TABLE accounts ADD COLUMN {col} {typ}")
                     except sqlite3.OperationalError:
                         pass
+
+            # ── индекс только ПОСЛЕ того как колонка точно существует ──
+            try:
+                c.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_avg_views "
+                    "ON accounts(avg_views_per_reel)"
+                )
+            except sqlite3.OperationalError:
+                pass
 
         # ── reels_uploads: догоняем новые колонки ──
         with self._cursor() as c:
