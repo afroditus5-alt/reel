@@ -1330,7 +1330,7 @@ class GeoResolver:
         if self.mmdb:
             self.mmdb.close()
 core/ig_client.py
-"""
+﻿"""
 IGClient v2 — точная классификация ошибок + безопасный сбор статистики.
 
 Ключевые типы ошибок (для orchestrator):
@@ -1672,10 +1672,7 @@ class IGClient:
                 pass
             await self._pause(0.6, 2.4)
 
-    # ═══════════════ AVATAR / PRIVACY / BIO — без изменений ═══════════════
-    # (методы change_profile_picture, get_privacy_status, set_privacy,
-    #  ensure_public, set_biography — скопируй из старого файла как есть)
-
+    # ═══════════════ AVATAR / PRIVACY / BIO ═══════════════
     async def change_profile_picture(self, image_path: str):
         from pathlib import Path
         import time as _t
@@ -1789,11 +1786,7 @@ class IGClient:
                 raise UploadError(f"set_biography mismatch: sent={len(bio)} got={len(actual)}")
         return j
 
-    # ═══════════════ UPLOAD REEL — БЕЗ ИЗМЕНЕНИЙ ═══════════════
-    # Скопируй из старого файла методы: upload_reel, _upload_cover,
-    # _probe_resolution, _extract_frame, _probe_duration.
-    # Я их не менял, они работают.
-
+    # ═══════════════ UPLOAD REEL ═══════════════
     async def _probe_resolution(self, path: str) -> tuple[int, int]:
         try:
             out = subprocess.check_output([
@@ -1852,7 +1845,6 @@ class IGClient:
         await self._upload_cover(upload_id, cover_path)
 
         duration_sec = max(duration_ms / 1000.0, 1.5)
-        # ═══ продолжение upload_reel ═══
         payload = {
             "upload_id": upload_id, "caption": caption,
             "clips_share_preview_to_feed": "1" if share_to_feed else "0",
@@ -1879,7 +1871,7 @@ class IGClient:
         }
 
         # ═══ WAIT-FIRST стратегия ═══
-        # Проблема: если configure_to_clips вызвать пока IG ещё транскодит —
+        # Если configure_to_clips вызвать пока IG ещё транскодит —
         # IG создаст draft media с caption=пусто, и повторные configure с caption
         # УЖЕ НЕ ПРИМЕНЯТСЯ (media exists). Поэтому ждём заранее.
 
@@ -1891,12 +1883,11 @@ class IGClient:
 
         # оценка времени транскодирования: ~8с/MB + 15с базовых
         video_size_mb = len(video_bytes) / 1024 / 1024
-        initial_wait = max(25, min(90, int(video_size_mb * 8) + 15))
+        initial_wait = max(35, min(120, int(video_size_mb * 12) + 20))
         print(f"[upload:{login}] жду {initial_wait}с транскодирования "
               f"(video {video_size_mb:.1f}MB) — configure ЕЩЁ НЕ вызываю")
         await asyncio.sleep(initial_wait + random.uniform(-2, 3))
 
-        # паттерны сообщений
         RETRIABLE_MSG_PATTERNS = (
             "transcode not finished", "transcoded",
             "something went wrong", "please try again",
@@ -1910,8 +1901,7 @@ class IGClient:
             "we restrict certain", "challenge_required",
         )
 
-        # Кэп: 4 попытки, между ними ЖИРНАЯ пауза (не мелкие 20с!)
-        # — потому что если первая не прошла, значит IG реально долго транскодит
+        # 4 попытки, между ними ЖИРНАЯ пауза — IG реально долго транскодит
         extra_waits = [45, 75, 120, 180]
         last_err = None
         last_err_msg = ""
@@ -1955,21 +1945,22 @@ class IGClient:
                 media_id = media_obj.get("id") or media_obj.get("pk")
                 applied_caption = (media_obj.get("caption") or {}).get("text", "") \
                                   if media_obj.get("caption") else ""
-
                 if caption and media_id:
                     if not applied_caption or applied_caption.strip() != caption.strip():
-                        # Caption дропнут. Ждём МНОГО и делаем edit_media правильно
                         print(f"[upload:{login}] configure OK на попытке #{attempt+1} "
                               f"НО caption потерян (sent={len(caption)} got={len(applied_caption)}) "
                               f"— force через edit_media с задержкой")
-                        # ВАЖНО: 60с паузы внутри _edit_media_caption
-                        await self._edit_media_caption(str(media_id), caption,
-                                                       wait_before=60.0)
+                        ok_cap = await self._edit_media_caption(str(media_id), caption,
+                                                               wait_before=60.0)
+                        if not ok_cap:
+                            # отдаём в фоновый ретрай orchestrator'а, если он есть
+                            cb = getattr(self, "on_caption_failed", None)
+                            if cb:
+                                cb(media_id, caption)
                     else:
                         print(f"[upload:{login}] ✓ configure OK, "
                               f"caption применён с первого раза ({len(caption)} симв)")
                 return j
-
             # ─── ошибка от IG ───
             msg = str(j.get("message", "")).lower()
             last_err = j
@@ -1989,7 +1980,6 @@ class IGClient:
                 continue
             raise UploadError(f"configure: {j}")
 
-        # все попытки — recovery через feed
         print(f"[upload:{login}] все ретраи configure провалились, "
               f"ищу в ленте (последняя ошибка: {last_err_msg[:100]})")
         recovered = await self._recover_caption_via_feed(caption, upload_id)
@@ -1997,67 +1987,500 @@ class IGClient:
             return recovered
 
         raise UploadError(f"configure failed + recovery не помог: {last_err}")
-    async def _edit_media_caption(self, media_id: str, caption: str,
-                                    wait_before: float = 60.0) -> bool:
-        """
-        Force-обновляет caption у уже созданного media.
-        КРИТИЧНО: ждём wait_before секунд перед вызовом чтобы IG не ответил
-        feedback_required (рейт-лимит на edit сразу после upload).
-        """
-        if not caption or not media_id:
-            return False
 
-        login = self.acc.get("login", "?")
-        # долгая пауза — иначе feedback_required гарантирован
-        if wait_before > 0:
-            print(f"[caption-fix:{login}] жду {int(wait_before)}с перед edit_media "
-                  f"(чтобы избежать feedback_required)")
-            await asyncio.sleep(wait_before + random.uniform(-3, 5))
+    # ═══════════════ STORY / WATCH / FOLLOW / HIGHLIGHT ═══════════════
+    def _is_ios(self) -> bool:
+        return bool((getattr(self, "acc", None) or {}).get("is_ios_iam"))
 
-        dev = self.s.device
-
-        # собираем uid и csrftoken из cookies — БЕЗ них IG рубит на feedback_required
-        uid = ""
-        csrf = ""
-        try:
-            for c in self.s._session.cookies.jar:
-                if c.name == "ds_user_id" and c.value:
-                    uid = c.value
-                elif c.name == "csrftoken" and c.value:
-                    csrf = c.value
-        except Exception:
-            pass
-
-        payload = {
-            "_csrftoken":       csrf,
-            "_uid":             uid,
-            "_uuid":            dev.device_id,
-            "container_module": "edit_media_info_page",
-            "device_id":        dev.android_id or dev.device_id,
-            "caption_text":     caption,
-        }
-        try:
-            body = json.dumps(payload, separators=(",", ":"))
+    async def _post_api(self, path: str, payload: dict):
+        """POST на /api/v1/{path}. Android: signed_body form. iOS: чистый JSON."""
+        csrf, uid = "", ""
+        for c in self.s._session.cookies.jar:
+            if c.name == "csrftoken" and c.value:
+                csrf = c.value
+            elif c.name == "ds_user_id" and c.value:
+                uid = c.value
+        if not uid:
+            uid = str(self.acc.get("uid") or self.acc.get("pk") or "")
+        payload.setdefault("_csrftoken", csrf)
+        payload.setdefault("_uid", uid)
+        payload.setdefault("_uuid", self.s.device.device_id)
+        body = json.dumps(payload, separators=(",", ":"))
+        if self._is_ios():
             r = await self.s.request(
-                "POST", f"{self.BASE}/api/v1/media/{media_id}/edit_media/",
+                "POST", f"{self.BASE}/api/v1/{path}",
+                data=body,
+                headers={"Content-Type":
+                    "application/json; charset=UTF-8"})
+        else:
+            r = await self.s.request(
+                "POST", f"{self.BASE}/api/v1/{path}",
+                data={"signed_body": f"SIGNATURE.{body}"},
+                headers={"Content-Type":
+                    "application/x-www-form-urlencoded; charset=UTF-8"})
+        return r
+
+    async def upload_story_photo(self, image_path: str):
+        """Публикует СТОРИ из картинки. Возвращает media_id сторис."""
+        from pathlib import Path
+        if not Path(image_path).exists():
+            raise UploadError(f"story image not found: {image_path}")
+        with open(image_path, "rb") as f:
+            img_bytes = f.read()
+        upload_id = str(int(time.time() * 1000))
+        dev = self.s.device
+        entity_name = f"{upload_id}_0_{random.randint(1_000_000_000, 9_999_999_999)}"
+        rupload_params = {
+            "media_type": "1", "upload_id": upload_id,
+            "for_direct_story": "1",
+            "camera_session_id": str(uuid.uuid4()),
+            "image_compression": json.dumps(
+                {"lib_name": "moz", "lib_version": "3.1.m", "quality": "80"}),
+            "retry_context": '{"num_step_auto_retry":0,"num_reupload":0,'
+                             '"num_step_manual_retry":0}',
+            "xsharing_user_ids": "[]",
+        }
+        headers = {
+            "Offset": "0", "X-Entity-Length": str(len(img_bytes)),
+            "X-Entity-Name": entity_name, "X-Entity-Type": "image/jpeg",
+            "X-Instagram-Rupload-Params": json.dumps(rupload_params),
+            "Content-Type": "application/octet-stream",
+        }
+        r = await self.s.request("POST", f"{self.BASE}/rupload_igphoto/{entity_name}",
+                                 data=img_bytes, headers=headers, timeout=60)
+        if r.status_code != 200:
+            raise UploadError(f"story rupload: HTTP {r.status_code} {r.text[:200]}")
+        await asyncio.sleep(random.uniform(2.0, 4.0))
+        csrf, uid = "", ""
+        for c in self.s._session.cookies.jar:
+            if c.name == "csrftoken" and c.value:
+                csrf = c.value
+            elif c.name == "ds_user_id" and c.value:
+                uid = c.value
+        now = int(time.time())
+        payload = {
+            "_csrftoken": csrf,
+            "_uid": uid or str(self.acc.get("uid") or self.acc.get("pk") or dev.device_id[:16]),
+            "_uuid": dev.device_id,
+            "device_id": dev.android_id or dev.device_id,
+            "upload_id": upload_id,
+            "caption": "",
+            "source_type": "4",
+            "configure_mode": "1",
+            "capture_type": "normal",
+            "story_media_creation_date": str(now - random.randint(11, 30)),
+            "client_shared_at": str(now - random.randint(3, 10)),
+            "client_timestamp": str(now),
+            "create_at": str(now),
+        }
+        body = json.dumps(payload, separators=(",", ":"))
+        attempts = []
+        # попытка 1: signed_body form на media/configure_to_story
+        # (тот же формат, что у рабочего configure_to_clips — работает на обеих платформах)
+        try:
+            r = await self.s.request(
+                "POST", f"{self.BASE}/api/v1/media/configure_to_story/",
                 data={"signed_body": f"SIGNATURE.{body}"},
                 headers={"Content-Type":
                     "application/x-www-form-urlencoded; charset=UTF-8"})
             try:
                 j = r.json()
             except Exception:
-                print(f"[caption-fix:{login}] non-JSON HTTP {r.status_code}: {r.text[:150]}")
-                return False
-
-            if j.get("status") == "ok":
-                print(f"[caption-fix:{login}] ✓ caption применён через edit_media "
-                      f"(len={len(caption)})")
-                return True
-            print(f"[caption-fix:{login}] edit_media fail: {str(j)[:200]}")
-            return False
+                attempts.append(f"media/signed: HTTP {r.status_code} {r.text[:120]}")
+                j = None
+            if j and j.get("status") == "ok":
+                media = j.get("media") or {}
+                return media.get("id") or media.get("pk")
+            if j:
+                attempts.append(f"media/signed: {str(j)[:150]}")
         except Exception as e:
-            print(f"[caption-fix:{login}] edit_media exception: {e}")
+            attempts.append(f"media/signed: {e}")
+        # попытка 2: простой urlencoded (без подписи) на media/configure_to_story
+        try:
+            r = await self.s.request(
+                "POST", f"{self.BASE}/api/v1/media/configure_to_story/",
+                data=payload)
+            try:
+                j = r.json()
+            except Exception:
+                attempts.append(f"media/form: HTTP {r.status_code} {r.text[:120]}")
+                j = None
+            if j and j.get("status") == "ok":
+                media = j.get("media") or {}
+                return media.get("id") or media.get("pk")
+            if j:
+                attempts.append(f"media/form: {str(j)[:150]}")
+        except Exception as e:
+            attempts.append(f"media/form: {e}")
+        raise UploadError("configure_to_story failed — " + " | ".join(attempts))
+
+    async def share_reel_to_story(self, media_id: str, image_path: str,
+                                  reel_url: str = ""):
+        """Шарит рилс в стори: нативная карточка через story_feed_media
+        (JSON-МАССИВ, как в реальном клиенте). Фолбэк — link-стикер на рилс."""
+        from pathlib import Path
+        if not image_path or not Path(image_path).exists():
+            raise UploadError(f"story reshare: нет картинки-превью: {image_path}")
+        reel_pk = str(media_id).split("_")[0]
+        dev = self.s.device
+        csrf, uid = "", ""
+        for c in self.s._session.cookies.jar:
+            if c.name == "csrftoken" and c.value:
+                csrf = c.value
+            elif c.name == "ds_user_id" and c.value:
+                uid = c.value
+        if not uid:
+            uid = str(self.acc.get("uid") or self.acc.get("pk") or "")
+        now = int(time.time())
+        camera_session = str(uuid.uuid4())
+        attempts = []
+
+        async def _rupload_photo():
+            with open(image_path, "rb") as f:
+                img_bytes = f.read()
+            up_id = str(int(time.time() * 1000))
+            entity = f"{up_id}_0_{random.randint(1_000_000_000, 9_999_999_999)}"
+            rp = {
+                "media_type": "1", "upload_id": up_id,
+                "for_direct_story": "1",
+                "camera_session_id": camera_session,
+                "image_compression": json.dumps(
+                    {"lib_name": "moz", "lib_version": "3.1.m", "quality": "80"}),
+                "retry_context": '{"num_step_auto_retry":0,"num_reupload":0,'
+                                 '"num_step_manual_retry":0}',
+                "xsharing_user_ids": "[]",
+            }
+            h = {
+                "Offset": "0", "X-Entity-Length": str(len(img_bytes)),
+                "X-Entity-Name": entity, "X-Entity-Type": "image/jpeg",
+                "X-Instagram-Rupload-Params": json.dumps(rp),
+                "Content-Type": "application/octet-stream",
+            }
+            rr = await self.s.request("POST", f"{self.BASE}/rupload_igphoto/{entity}",
+                                      data=img_bytes, headers=h, timeout=60)
+            if rr.status_code != 200:
+                raise UploadError(f"reshare rupload: HTTP {rr.status_code}")
+            await asyncio.sleep(random.uniform(2.0, 4.0))
+            return up_id
+
+        def _payload(upload_id, source_type, with_feed_media):
+            p = {
+                "_csrftoken": csrf, "_uid": uid, "_uuid": dev.device_id,
+                "upload_id": upload_id,
+                "source_type": source_type,
+                "configure_mode": "1",
+                "camera_session_id": camera_session,
+                "story_media_creation_date": str(now - random.randint(11, 30)),
+                "client_shared_at": str(now - random.randint(3, 10)),
+                "client_timestamp": str(now),
+                "client_context": str(uuid.uuid4()),
+                "supported_capabilities_new": json.dumps({}),
+                "xsharing_user_ids": "[]",
+            }
+            if with_feed_media:
+                # КРИТИЧНО: story_feed_media — JSON МАССИВ [{...}], не объект.
+                # Объект IG молча дропает — сторис публикуется без карточки.
+                p["story_feed_media"] = json.dumps([{
+                    "x": 0.5, "y": 0.5, "z": 0,
+                    "width": 0.6, "height": 0.8,
+                    "rotation": 0.0,
+                    "is_sticker": True,
+                    "is_hidden": False,
+                    "media_id": reel_pk,
+                    "product_type": "clips",
+                    "media_type": 2,
+                }])
+            return p
+
+        async def _try_configure(p, tag):
+            body = json.dumps(p, separators=(",", ":"))
+            for label, data in (
+                ("signed", {"signed_body": f"SIGNATURE.{body}"}),
+                ("form", p),
+            ):
+                try:
+                    r = await self.s.request(
+                        "POST", f"{self.BASE}/api/v1/media/configure_to_story/",
+                        data=data,
+                        headers={"Content-Type":
+                            "application/x-www-form-urlencoded; charset=UTF-8"})
+                    try:
+                        j = r.json()
+                    except Exception:
+                        attempts.append(f"{tag}/{label}: HTTP {r.status_code}")
+                        continue
+                    if j.get("status") == "ok":
+                        media = j.get("media") or {}
+                        sid = media.get("id") or media.get("pk")
+                        has_card = bool(media.get("story_feed_media")
+                                        or media.get("story_sticker_ids"))
+                        print(f"[reshare:{self.acc.get('login')}] "
+                              f"{'карточка рилса OK' if has_card else 'сторис без карточки'} "
+                              f"({tag}/{label})")
+                        return sid, has_card
+                    attempts.append(f"{tag}/{label}: {str(j)[:100]}")
+                except Exception as e:
+                    attempts.append(f"{tag}/{label}: {e}")
+            return None, False
+
+        # ── одна сторис с link-стикером на рилс (нативную карточку IG дропает) ──
+        up = await _rupload_photo()
+        link = reel_url or f"https://www.instagram.com/reel/{reel_pk}/"
+        p = _payload(up, "4", False)
+        p["story_sticker_ids"] = json.dumps(
+            [f"link_sticker_{uuid.uuid4().hex.upper()}"])
+        p["link_url"] = link
+        p["story_link_url"] = link
+        p["story_link_text"] = "Открыть рилс"
+        sid, _ = await _try_configure(p, "link")
+        if sid:
+            return sid
+        raise UploadError("share_reel_to_story failed — " + " | ".join(attempts))
+
+    @staticmethod
+    def _extract_media_ids(j, limit=40):
+        """Универсальный парсер: достаёт media_id из items независимо от формата."""
+        ids = []
+        for it in (j.get("items") or []):
+            m = it.get("media") or it  # item может быть самим медиа
+            if not isinstance(m, dict):
+                continue
+            if m.get("media_type") == 2 or m.get("product_type") == "clips" \
+               or "video_versions" in m or "image_versions2" in m:
+                mid = m.get("id") or m.get("pk")
+                if mid:
+                    ids.append(str(mid))
+        return ids[:limit]
+    async def self_engage(self, media_id: str, like: bool = True):
+        """Автор сам смотрит свой рилс (media/seen) и лайкает его."""
+        dev = self.s.device
+        # 1) просмотр своего рилса
+        seen_body = json.dumps({
+            "reels": json.dumps({str(media_id): {"skipped_timing": "0"}}),
+            "live_reels": "{}",
+        }, separators=(",", ":"))
+        await self._post_api("media/seen", {
+            "_uuid": dev.device_id,
+            "reels": seen_body,
+            "live_reels": "{}",
+        })
+        if not like:
+            return
+        # 2) лайк своего рилса
+        csrf, uid = "", ""
+        for c in self.s._session.cookies.jar:
+            if c.name == "csrftoken" and c.value:
+                csrf = c.value
+            elif c.name == "ds_user_id" and c.value:
+                uid = c.value
+        if not uid:
+            uid = str(self.acc.get("uid") or self.acc.get("pk") or "")
+        payload = {
+            "_csrftoken": csrf, "_uid": uid, "_uuid": dev.device_id,
+            "media_id": str(media_id),
+            "module_name": "reel_feed_timeline",
+        }
+        body = json.dumps(payload, separators=(",", ":"))
+        r = await self.s.request(
+            "POST", f"{self.BASE}/api/v1/media/{media_id}/like/",
+            data={"signed_body": f"SIGNATURE.{body}"},
+            headers={"Content-Type":
+                "application/x-www-form-urlencoded; charset=UTF-8"})
+        try:
+            j = r.json()
+        except Exception:
+            raise UploadError(f"self_like non-JSON HTTP {r.status_code}: {r.text[:120]}")
+        if j.get("status") != "ok":
+            raise UploadError(f"self_like failed: {str(j)[:150]}")
+    async def watch_reels(self, count: int = 3, query: str = ""):
+        """Смотрит N рилсов с паузами. query = тематический поиск."""
+        dev = self.s.device
+        media_ids = []
+        if query:
+            r = await self.s.request("GET", f"{self.BASE}/api/v1/fbsearch/top_search/",
+                                     params={"q": query, "count": "30"})
+            try:
+                j = r.json()
+            except Exception:
+                j = {}
+            media_ids += self._extract_media_ids(j)
+        if len(media_ids) < count:
+            session_id = str(uuid.uuid4())
+            r = await self._post_api("clips/feed", {
+                "supported_capabilities_new": json.dumps({}),
+                "session_id": session_id,
+                "page_size": "10",
+                "include_feed_video": "true",
+            })
+            try:
+                j = r.json()
+            except Exception:
+                j = {}
+            media_ids += self._extract_media_ids(j)
+        # фолбэк: если поиск и лента пустые — берём сторис-трей
+        if not media_ids:
+            try:
+                r = await self.s.request("GET", f"{self.BASE}/api/v1/feed/reels_tray/")
+                j = r.json()
+                for seg in (j.get("tray") or []):
+                    mid = (seg.get("id") or seg.get("media", {}).get("id"))
+                    if mid:
+                        media_ids.append(str(mid))
+            except Exception:
+                pass
+        random.shuffle(media_ids)
+        watched = 0
+        for mid in media_ids:
+            if watched >= count:
+                break
+            await asyncio.sleep(random.uniform(4.0, 10.0))
+            seen_body = json.dumps({
+                "reels": json.dumps({mid: {"skipped_timing": "0"}}),
+                "live_reels": "{}",
+            }, separators=(",", ":"))
+            try:
+                await self._post_api("media/seen", {
+                    "_uuid": dev.device_id,
+                    "reels": seen_body,
+                    "live_reels": "{}",
+                })
+                watched += 1
+            except Exception:
+                continue
+        return watched
+
+    async def follow_by_query(self, query: str, count: int = 3):
+        """Ищет юзеров по запросу и подписывается на count штук."""
+        r = await self.s.request("GET", f"{self.BASE}/api/v1/users/search/",
+                                 params={"q": query, "count": "30"})
+        try:
+            users = r.json().get("users", [])
+        except Exception:
+            users = []
+        users = [u for u in users if not u.get("is_verified") and not u.get("is_private")]
+        random.shuffle(users)
+        followed = 0
+        for u in users:
+            if followed >= count:
+                break
+            await asyncio.sleep(random.uniform(12.0, 30.0))
+            try:
+                r = await self._post_api(f"friendships/create/{u.get('pk')}/",
+                                         {"user_id": str(u.get("pk"))})
+                j = r.json()
+            except Exception:
+                continue
+            if j.get("status") == "ok":
+                followed += 1
+        return followed
+
+    async def save_story_to_highlight(self, story_media_id: str, title: str = "Reels"):
+        """Создаёт актуальное из фотостори. Перебирает source_type: '3' — рабочий."""
+        dev = self.s.device
+        csrf, uid = "", ""
+        for c in self.s._session.cookies.jar:
+            if c.name == "csrftoken" and c.value:
+                csrf = c.value
+            elif c.name == "ds_user_id" and c.value:
+                uid = c.value
+        if not uid:
+            uid = str(self.acc.get("uid") or self.acc.get("pk") or "")
+        story_pk = str(story_media_id).split("_")[0]
+        attempts = []
+        for st in ("3", "1", "self_story"):
+            payload = {
+                "_uid": uid, "_uuid": dev.device_id, "_csrftoken": csrf,
+                "supported_capabilities_new": json.dumps({}),
+                "media_ids": json.dumps([story_pk]),
+                "title": title[:15],
+                "source_type": st,
+                "creation_mode": "new",
+                "disable_media_id": "",
+            }
+            body = json.dumps(payload, separators=(",", ":"))
+            for label, data in (
+                ("signed", {"signed_body": f"SIGNATURE.{body}"}),
+                ("form", payload),
+            ):
+                try:
+                    r = await self.s.request(
+                        "POST", f"{self.BASE}/api/v1/highlights/create_reel/",
+                        data=data,
+                        headers={"Content-Type":
+                            "application/x-www-form-urlencoded; charset=UTF-8"})
+                    try:
+                        j = r.json()
+                    except Exception:
+                        attempts.append(f"st{st}/{label}: HTTP {r.status_code}")
+                        continue
+                    if j.get("status") == "ok":
+                        print(f"[highlight:{self.acc.get('login')}] "
+                              f"актуальное создано (source_type={st})")
+                        return j
+                    attempts.append(f"st{st}/{label}: {str(j)[:100]}")
+                except Exception as e:
+                    attempts.append(f"st{st}/{label}: {e}")
+            await asyncio.sleep(random.uniform(10, 20))
+        raise UploadError("highlight failed — " + " | ".join(attempts))
+
+    # ═══════════════ CAPTION FIX / RECOVERY ═══════════════
+    async def _edit_media_caption(self, media_id: str, caption: str,
+                                    wait_before: float = 60.0) -> bool:
+        """Force-обновляет caption. feedback_required и сетевые сбои (включая
+        прокси-SSL) считаются ретраебельными — до 3 попыток с нарастающей паузой."""
+        if not caption or not media_id:
             return False
+        login = self.acc.get("login", "?")
+        waits = [wait_before, wait_before + 120, wait_before + 240]
+        for attempt, w in enumerate(waits, 1):
+            if w > 0:
+                print(f"[caption-fix:{login}] попытка #{attempt}, жду {int(w)}с")
+                await asyncio.sleep(w + random.uniform(-3, 5))
+            dev = self.s.device
+            uid, csrf = "", ""
+            try:
+                for c in self.s._session.cookies.jar:
+                    if c.name == "ds_user_id" and c.value:
+                        uid = c.value
+                    elif c.name == "csrftoken" and c.value:
+                        csrf = c.value
+            except Exception:
+                pass
+            payload = {
+                "_csrftoken": csrf,
+                "_uid": uid or str(self.acc.get("uid") or self.acc.get("pk") or ""),
+                "_uuid": dev.device_id,
+                "container_module": "edit_media_info_page",
+                "device_id": dev.android_id or dev.device_id,
+                "caption_text": caption,
+            }
+            try:
+                body = json.dumps(payload, separators=(",", ":"))
+                r = await self.s.request(
+                    "POST", f"{self.BASE}/api/v1/media/{media_id}/edit_media/",
+                    data={"signed_body": f"SIGNATURE.{body}"},
+                    headers={"Content-Type":
+                        "application/x-www-form-urlencoded; charset=UTF-8"})
+                try:
+                    j = r.json()
+                except Exception:
+                    print(f"[caption-fix:{login}] non-JSON HTTP {r.status_code}")
+                    continue
+                if j.get("status") == "ok":
+                    print(f"[caption-fix:{login}] ✓ caption применён (попытка #{attempt})")
+                    return True
+                msg = str(j.get("message", "")).lower()
+                if "feedback_required" in msg:
+                    print(f"[caption-fix:{login}] feedback_required — ретрай позже")
+                    continue
+                print(f"[caption-fix:{login}] edit_media fail: {str(j)[:150]}")
+                return False
+            except Exception as e:
+                print(f"[caption-fix:{login}] сетевой сбой ({type(e).__name__}) — ретрай")
+                continue
+        print(f"[caption-fix:{login}] все {len(waits)} попыток исчерпаны")
+        return False
+
     async def _find_recently_uploaded_media(self, user_id: str,
                                              upload_id: str,
                                              max_age_sec: int = 300) -> str | None:
@@ -2082,13 +2505,11 @@ class IGClient:
                 taken_at = int(item.get("taken_at") or 0)
                 if now - taken_at > max_age_sec:
                     continue
-                # ищем clips
                 is_reel = (item.get("product_type") == "clips"
                           or item.get("media_type") == 2
                           or "clips_metadata" in item)
                 if not is_reel:
                     continue
-                # проверяем caption — если пустой или отличается, это наш кандидат
                 mid = item.get("id") or item.get("pk")
                 if mid:
                     return str(mid)
@@ -2105,7 +2526,6 @@ class IGClient:
         Возвращает синтетический result dict {'status': 'ok', 'media': {...}} или None.
         """
         login = self.acc.get("login", "?")
-        # получаем uid из cookies
         uid = None
         try:
             for c in self.s._session.cookies.jar:
@@ -2118,7 +2538,6 @@ class IGClient:
             print(f"[caption-recover:{login}] no ds_user_id in cookies")
             return None
 
-        # ждём чтобы IG успел зафиксировать media в ленте
         await asyncio.sleep(random.uniform(8, 15))
 
         media_id = await self._find_recently_uploaded_media(uid, upload_id)
@@ -2138,6 +2557,7 @@ class IGClient:
 
         return {"status": "ok", "media": {"id": media_id, "pk": media_id},
                 "_recovered_via_feed": True}
+
     async def _upload_cover(self, upload_id: str, cover_path: str):
         with open(cover_path, "rb") as f:
             data = f.read()
@@ -2157,7 +2577,6 @@ class IGClient:
         if r.status_code != 200:
             print(f"[cover] upload returned {r.status_code}: {r.text[:150]}")
         await asyncio.sleep(random.uniform(1.5, 3.0))
-
 
     # ═══════════════ STATS — БЕЗОПАСНЫЙ РЕЖИМ ═══════════════
     async def get_self_stats(self, user_id: str, mode: str = "light") -> dict:
@@ -2199,36 +2618,27 @@ class IGClient:
             "total_reposts":  0,
             "username":       info.get("username"),
             "is_private":     bool(info.get("is_private", False)),
-            "is_suspended":   False,   # если бы был suspended — упало бы выше
+            "is_suspended":   False,
             "stats_mode":     mode,
         }
 
         if mode == "light":
-            # info даёт media_count но НЕ даёт reels_count и views. Это ок —
-            # для 90% сценариев (жив/подписчики/публичный) этого хватает.
             return result
 
         if mode == "combo":
-            # Плюс один запрос на последний media, если он clips-типа.
-            # НЕ дёргаем /feed/user/ — это self-view и палит.
             try:
-                # media_count > 0 гарантирует хоть какой-то пост
                 if info.get("media_count", 0) > 0:
-                    # мы не знаем pk последнего media без feed. Один компромисс:
-                    # спросить highlight_reels_media (не пометка!)
                     r2 = await self.s.request(
                         "GET",
                         f"{self.BASE}/api/v1/highlights/{user_id}/highlights_tray/",
                     )
-                    # используется только чтобы IG посчитал что мы 'смотрим свой профиль'
-                    # реальные просмотры собираем через отдельный watcher-акк (см. док)
                     pass
             except Exception:
                 pass
             return result
 
-        # mode == "deep" — старое поведение, ТОЛЬКО для A/B. НЕ юзать массово.
         return await self._get_stats_deep(user_id, result)
+
     async def get_media_info(self, media_id: str) -> dict:
         """
         Безопасно получает статистику ОДНОГО рилса через /media/{id}/info/.
@@ -2244,7 +2654,6 @@ class IGClient:
         if 500 <= r.status_code < 600:
             raise TransientError(f"HTTP {r.status_code} on media/info")
         if r.status_code == 404:
-            # рилс удалён или media_id битый
             return {"deleted": True}
 
         try:
@@ -2269,6 +2678,7 @@ class IGClient:
             "product_type":  item.get("product_type"),
             "deleted":       False,
         }
+
     async def _get_stats_deep(self, user_id: str, base: dict) -> dict:
         """Опасный режим — оставлен для A/B тестов и одноразовых аудитов."""
         seen_ids = set()
@@ -2592,6 +3002,8 @@ class Orchestrator:
         self.sem = Semaphore(threads)
         self.on_status = on_status
         self.db = db
+        self._caption_queue = asyncio.Queue()
+        self._caption_worker_started = False
         self.settings = settings or {}
         self.stats_sink = stats_sink
         self.geo = geo or GeoResolver(db_path="data/geo_cache.db")
@@ -2883,6 +3295,15 @@ class Orchestrator:
                 "params_hash": hashlib.md5(json.dumps({
                     "u_level":  params.get("uniquify_level"),
                     "u_covers": params.get("uniquify_covers"),
+                    "pre_story": params.get("pre_story"),
+                    "share_story": params.get("share_reel_to_story"),
+                    "highlight_story": params.get("highlight_story"),
+                    "watch_reels": params.get("watch_reels"),
+                    "watch_count": params.get("watch_count"),
+                    "follow_users": params.get("follow_users"),
+                    "follow_count": params.get("follow_count"),
+                    "self_engage": params.get("self_engage"),
+                    "self_like": params.get("self_like"),
                     "warmup":   params.get("warmup"),
                     "d_min":    params.get("delay_min"),
                     "d_max":    params.get("delay_max"),
@@ -2893,6 +3314,15 @@ class Orchestrator:
                     "u_level":  params.get("uniquify_level"),
                     "u_covers": params.get("uniquify_covers"),
                     "warmup":   params.get("warmup"),
+                    "pre_story": params.get("pre_story"),
+                    "share_story": params.get("share_reel_to_story"),
+                    "highlight_story": params.get("highlight_story"),
+                    "watch_reels": params.get("watch_reels"),
+                    "watch_count": params.get("watch_count"),
+                    "self_engage": params.get("self_engage"),
+                    "self_like": params.get("self_like"),
+                    "follow_users": params.get("follow_users"),
+                    "follow_count": params.get("follow_count"),
                     "d_min":    params.get("delay_min"),
                     "d_max":    params.get("delay_max"),
                     "first_setup": params.get("first_setup_enable"),
@@ -2948,6 +3378,7 @@ class Orchestrator:
 
         sess = IGSession(device, acc["proxy"], cookies)
         cli = IGClient(sess, acc)
+        cli.on_caption_failed = lambda mid, cap: self._queue_caption_fix(cli, acc, mid, cap)
 
         try:
             # Login (с обработкой чекпоинта)
@@ -3006,6 +3437,7 @@ class Orchestrator:
                           "first_setup_enable": should_bio,
                           "first_setup_avatar": should_avatar}
             # ── целевое действие ──
+            # ── целевое действие ──
             if action == "upload_reel":
                 ensure_pub = params.get("ensure_public", True)
                 if params.get("ensure_public_override") is False:
@@ -3027,22 +3459,41 @@ class Orchestrator:
                               or params.get("first_setup_avatar"))
                 if need_setup and not acc.get("first_setup_done"):
                     await self._do_first_setup(cli, acc, params)
-                return await self._upload(cli, params)
 
-            if action == "set_bio":
-                if params.get("ensure_public", False) and not acc.get("is_public_verified"):
+                # ── pre_story: сторис ПЕРЕД рилсом (S3/S4/S9) ──
+                if params.get("pre_story"):
                     try:
-                        status = await cli.ensure_public(str(uid))
-                        if status in ("was_public", "made_public") and self.db:
-                            self.db.mark_public_verified(acc["login"])
-                            acc["is_public_verified"] = 1
-                    except Exception:
-                        pass
-                bio_text = self._pick_bio(params, acc["login"])
-                result = await cli.set_biography(bio_text)
-                if self.db and result.get("status") == "ok":
-                    h = hashlib.md5(bio_text.encode("utf-8")).hexdigest()
-                    self.db.set_bio_hash(acc["login"], h)
+                        story_folder = params.get("cover_folder") or params.get("avatar_folder")
+                        if story_folder and Path(story_folder).is_dir():
+                            img = await AssetPicker.pick(story_folder)
+                            if img:
+                                try:
+                                    if params.get("uniquify_covers", True):
+                                        tmp = await ImageUniquifier.unique_async(img, is_avatar=False)
+                                        sid = await cli.upload_story_photo(tmp)
+                                        try: Path(tmp).unlink(missing_ok=True)
+                                        except Exception: pass
+                                    else:
+                                        sid = await cli.upload_story_photo(img)
+                                    if sid:
+                                        acc["_last_story_media_id"] = str(sid)
+                                        print(f"[story:{acc['login']}] SUCCESS: сторис опубликована "
+                                              f"(media_id={sid}), пауза перед рилсом")
+                                        await self._sleep(random.uniform(60, 150))
+                                    else:
+                                        print(f"[story:{acc['login']}] FAIL: сторис не вернула media_id")
+                                finally:
+                                    AssetPicker.release(img)
+                        else:
+                            print(f"[story:{acc['login']}] FAIL: папка для сторис не найдена "
+                                  f"({story_folder})")
+                    except Exception as e:
+                        print(f"[story:{acc['login']}] FAIL: {e}")
+
+                # ── сам рилс ──
+                result = await self._upload(cli, params)
+                # ── пост-действия: шер в стори / актуальное / watch / follow ──
+                await self._post_reel_engagement(cli, acc, params, result)
                 return result
 
             if action == "set_avatar":
@@ -3113,7 +3564,15 @@ class Orchestrator:
                           f"views={total_views}, likes={total_likes}")
 
                 return result
-
+            if action == "noop_warm":
+                if not acc.get("is_ios_iam"):
+                    try:
+                        await cli.warm_postlogin(str(uid), intensity=params.get("warmup", "min"))
+                    except Exception:
+                        pass
+                stats = await cli.get_self_stats(str(uid), mode="light")
+                return {"alive": True, "followers": stats.get("followers", 0),
+                        "username": stats.get("username")}
             if action == "health_check":
                 # Новая задача: только login + info/. Не пишет ничего кроме статуса.
                 # Используется для рефреша статуса всех "banned" акков — узнать
@@ -3520,6 +3979,7 @@ class Orchestrator:
             if temp_cover_uniq:
                 try: Path(temp_cover_uniq).unlink(missing_ok=True)
                 except Exception: pass
+            cli.acc["_last_reel_video"] = src
         except Exception:
             if cover_reserved: AssetPicker.release(cover_reserved)
             if temp_cover_uniq:
@@ -3549,7 +4009,183 @@ class Orchestrator:
                 caption_hash=caption_hash,
                 caption_preview=caption_preview)
         return result
+    def _queue_caption_fix(self, cli, acc, media_id: str, caption: str):
+        if not media_id or not caption:
+            return
+        if not self._caption_worker_started:
+            self._caption_worker_started = True
+            try:
+                asyncio.get_event_loop().create_task(self._caption_retry_worker())
+            except Exception:
+                self._caption_worker_started = False
+        self._caption_queue.put_nowait((cli, acc.get("login"), str(media_id), caption))
 
+    async def _caption_retry_worker(self):
+        while True:
+            cli, login, media_id, caption = await self._caption_queue.get()
+            try:
+                for rnd in range(8):
+                    await asyncio.sleep(random.uniform(600, 900))  # 10-15 мин между заходами
+                    try:
+                        ok = await cli._edit_media_caption(media_id, caption, wait_before=0)
+                    except Exception:
+                        ok = False
+                    if ok:
+                        print(f"[caption-bg:{login}] ✓ caption дотянут с фона "
+                              f"(заход #{rnd+1})")
+                        break
+                else:
+                    print(f"[caption-bg:{login}] caption не применился за 8 заходов, "
+                          f"рилс жив но без описания")
+            except Exception as e:
+                print(f"[caption-bg:{login}] worker error: {e}")
+            finally:
+                self._caption_queue.task_done()
+    async def _post_reel_engagement(self, cli, acc, params, result):
+        login = acc.get("login")
+        is_ios = False
+        media_id = None
+        m_obj = {}
+        if isinstance(result, dict):
+            m_obj = result.get("media") or {}
+            media_id = m_obj.get("id") or m_obj.get("pk")
+        done, fail = [], []
+
+        # ── шер рилса в стори (link-стикер на рилс) ──
+        if params.get("share_reel_to_story"):
+            if not media_id:
+                fail.append("story_share(нет media_id)")
+            else:
+                tmp_path = None
+                story_folder = None
+                try:
+                    # 1) превью: из папки обложек...
+                    story_folder = params.get("cover_folder") or params.get("avatar_folder")
+                    if story_folder and Path(story_folder).is_dir():
+                        img = await AssetPicker.pick(story_folder)
+                        if img:
+                            try:
+                                if params.get("uniquify_covers", True):
+                                    tmp_path = await ImageUniquifier.unique_async(img, is_avatar=False)
+                                else:
+                                    tmp_path = img
+                            finally:
+                                AssetPicker.release(img)
+                    # 2) ...фолбэк: кадр из самого залитого видео
+                    if not tmp_path and acc.get("_last_reel_video"):
+                        try:
+                            tmp_path = await cli._extract_frame(acc["_last_reel_video"])
+                        except Exception:
+                            tmp_path = None
+                    if not tmp_path:
+                        fail.append("story_share(нет картинки-превью)")
+                    else:
+                        # пауза 45-150с (человеческий темп, не палево)
+                        delay_lo = float(params.get("share_delay_min", 45))
+                        delay_hi = float(params.get("share_delay_max", 150))
+                        await asyncio.sleep(random.uniform(delay_lo, delay_hi))
+                        # получаем code рилса для ссылки-стикера
+                        reel_url = ""
+                        code = m_obj.get("code")
+                        if not code:
+                            try:
+                                info = await cli.get_media_info(str(media_id))
+                                code = info.get("code")
+                            except Exception:
+                                code = None
+                        if code:
+                            reel_url = f"https://www.instagram.com/reel/{code}/"
+                        sid = await cli.share_reel_to_story(str(media_id), tmp_path,
+                                                            reel_url)
+                        done.append("story_share")
+                        if sid and not acc.get("_last_story_media_id"):
+                            acc["_last_story_media_id"] = str(sid)
+                except Exception as e:
+                    fail.append(f"story_share({e})")
+                finally:
+                    # чистим временный файл (но не файлы из папки обложек)
+                    if tmp_path and story_folder and not tmp_path.startswith(str(story_folder)):
+                        try: Path(tmp_path).unlink(missing_ok=True)
+                        except Exception: pass
+
+        # ── актуальное из опубликованной стори ──
+        if params.get("highlight_story"):
+            if not acc.get("_last_story_media_id"):
+                fail.append("highlight(нет сторис media_id)")
+            else:
+                try:
+                    await asyncio.sleep(random.uniform(45, 90))
+                    try:
+                        await cli.save_story_to_highlight(
+                            str(acc["_last_story_media_id"]),
+                            params.get("highlight_title", "Reels"))
+                        done.append("highlight")
+                    except Exception:
+                        # фоновый ретрай: 3 захода через 10-15 мин
+                        for rnd in range(3):
+                            await asyncio.sleep(random.uniform(600, 900))
+                            try:
+                                await cli.save_story_to_highlight(
+                                    str(acc["_last_story_media_id"]),
+                                    params.get("highlight_title", "Reels"))
+                                print(f"[highlight:{login}] ✓ актуальное создано "
+                                      f"с фона (заход #{rnd+1})")
+                                done.append(f"highlight(bg#{rnd+1})")
+                                break
+                            except Exception:
+                                continue
+                        else:
+                            fail.append("highlight(3 фоновых захода исчерпаны)")
+                except Exception as e:
+                    fail.append(f"highlight({e})")
+
+        # ── просмотр рилсов по теме ──
+        if params.get("watch_reels"):
+            try:
+                await asyncio.sleep(random.uniform(10, 30))
+                try:
+                    n = await cli.watch_reels(int(params.get("watch_count", 3)),
+                                              params.get("watch_query", ""))
+                    done.append(f"watch({n})")
+                except Exception as e:
+                    # ретрай один раз (SSL-сбои прокси и т.п.)
+                    await asyncio.sleep(random.uniform(30, 60))
+                    n = await cli.watch_reels(int(params.get("watch_count", 3)),
+                                              params.get("watch_query", ""))
+                    done.append(f"watch({n},retry)")
+            except Exception as e2:
+                fail.append(f"watch({e2})")
+
+        # ── подписки по теме ──
+        if params.get("follow_users"):
+            try:
+                await asyncio.sleep(random.uniform(15, 40))
+                n = await cli.follow_by_query(params.get("follow_query", "polymarket"),
+                                              int(params.get("follow_count", 3)))
+                done.append(f"follow({n})")
+            except Exception as e:
+                fail.append(f"follow({e})")
+        # ── само-вовлечённость: смотрим и лайкаем свой рилс позже, в фоне ──
+        if params.get("self_engage") and media_id:
+            delay_lo = float(params.get("self_engage_delay_min", 900))
+            delay_hi = float(params.get("self_engage_delay_max", 1800))
+            do_like = bool(params.get("self_like", True))
+
+            async def _bg_self_engage():
+                try:
+                    await asyncio.sleep(random.uniform(delay_lo, delay_hi))
+                    await cli.self_engage(str(media_id), like=do_like)
+                    print(f"[self-engage:{login}] SUCCESS: посмотрел+лайкнул свой рилс")
+                except Exception as e:
+                    print(f"[self-engage:{login}] FAIL: {e}")
+
+            asyncio.get_event_loop().create_task(_bg_self_engage())
+        if done:
+            print(f"[post:{login}] SUCCESS: {', '.join(done)}")
+        if fail:
+            print(f"[post:{login}] FAIL/SKIP: {', '.join(fail)}")
+        if not done and not fail:
+            print(f"[post:{login}] пост-действий нет (простой залив)")
     # ═══════════════════════════════════════════════════════════
     @staticmethod
     def _spin(text: str) -> str:
@@ -6820,6 +7456,9 @@ class MainWindow(QMainWindow):
         edit_m.addSeparator()
         edit_m.addAction("Удалить выделенные\tDel", self.table._delete_selected)
         edit_m.addAction("Удалить banned", self._delete_banned)
+        m_diag = self.menuBar().addMenu("Диагностика")
+        act_death = m_diag.addAction("Показать причину смерти")
+        act_death.triggered.connect(self._show_death_reason)
         edit_m.addAction("Удалить с ошибками", self._delete_errors)
 
         run_m = mb.addMenu("&Запуск")
@@ -10356,14 +10995,14 @@ PARAM_PRESETS = {
     },
         "R1_reel_only": {
         "description": "R1: только рилс, ничего лишнего (базовый минимум)",
-        "warmup": "min", "delay_min": 90, "delay_max": 240,
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
         "uniquify_level": "universal", "uniquify_covers": True,
         "first_setup_enable": False, "first_setup_avatar": False,
         "ensure_public": False,
     },
     "R1_no_cover": {
         "description": "R1: БЕЗ обложки из папки (первый кадр видео)",
-        "warmup": "min", "delay_min": 90, "delay_max": 240,
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
         "uniquify_level": "universal", "uniquify_covers": False,
         "first_setup_enable": False, "first_setup_avatar": False,
         "ensure_public": False,
@@ -10371,21 +11010,21 @@ PARAM_PRESETS = {
     },
     "R1_no_uniq": {
         "description": "R1: БЕЗ уникализации видео (raw, только remux)",
-        "warmup": "min", "delay_min": 90, "delay_max": 240,
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
         "uniquify_level": "fast", "uniquify_covers": False,
         "first_setup_enable": False, "first_setup_avatar": False,
         "ensure_public": False,
     },
     "R1_full_setup": {
         "description": "R1: с bio + avatar + ensure_public (полный setup)",
-        "warmup": "min", "delay_min": 90, "delay_max": 240,
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
         "uniquify_level": "universal", "uniquify_covers": True,
         "first_setup_enable": True, "first_setup_avatar": True,
         "ensure_public": True,
     },
     "R1_burst_3": {
         "description": "R1: burst 3 рилса на акк (cooldown 60-120с)",
-        "warmup": "min", "delay_min": 90, "delay_max": 240,
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
         "uniquify_level": "universal", "uniquify_covers": True,
         "first_setup_enable": False, "first_setup_avatar": False,
         "ensure_public": False,
@@ -10398,14 +11037,14 @@ PARAM_PRESETS = {
     # ═══ ROUND 2: Вариации на тему обложек ═══
     "R2_cover_no_uniq": {
         "description": "R2: обложка ЕСТЬ, но НЕ уникализируем (тот же файл на всех)",
-        "warmup": "min", "delay_min": 90, "delay_max": 240,
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
         "uniquify_level": "universal", "uniquify_covers": False,
         "first_setup_enable": False, "first_setup_avatar": False,
         "ensure_public": False,
     },
     "R2_cover_verified": {
         "description": "R2: 'проверенная' обложка (одна и та же на всех + uniq)",
-        "warmup": "min", "delay_min": 90, "delay_max": 240,
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
         "uniquify_level": "universal", "uniquify_covers": True,
         "first_setup_enable": False, "first_setup_avatar": False,
         "ensure_public": False,
@@ -10413,7 +11052,7 @@ PARAM_PRESETS = {
     },
     "R2_first_frame_only": {
         "description": "R2: только первый кадр видео как cover, никаких файлов",
-        "warmup": "min", "delay_min": 90, "delay_max": 240,
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
         "uniquify_level": "universal", "uniquify_covers": False,
         "first_setup_enable": False, "first_setup_avatar": False,
         "ensure_public": False,
@@ -10439,14 +11078,14 @@ PARAM_PRESETS = {
     # ═══ ROUND 2: Вариации uniquify уровней ═══
     "R2_uniq_heavy": {
         "description": "R2: HEAVY уникализация (rotate + eq + trim агрессивно)",
-        "warmup": "min", "delay_min": 90, "delay_max": 240,
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
         "uniquify_level": "heavy", "uniquify_covers": True,
         "first_setup_enable": False, "first_setup_avatar": False,
         "ensure_public": False,
     },
     "R2_uniq_compact": {
         "description": "R2: COMPACT (720p + низкий bitrate)",
-        "warmup": "min", "delay_min": 90, "delay_max": 240,
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
         "uniquify_level": "compact", "uniquify_covers": True,
         "first_setup_enable": False, "first_setup_avatar": False,
         "ensure_public": False,
@@ -10455,7 +11094,7 @@ PARAM_PRESETS = {
     # ═══ ROUND 2: Burst вариации ═══
     "R2_burst_5_slow": {
         "description": "R2: burst 5 рилсов, cooldown 3-7 мин (безопасный)",
-        "warmup": "min", "delay_min": 90, "delay_max": 240,
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
         "uniquify_level": "universal", "uniquify_covers": True,
         "first_setup_enable": False, "first_setup_avatar": False,
         "ensure_public": False,
@@ -10466,7 +11105,7 @@ PARAM_PRESETS = {
     },
     "R2_burst_5_fast": {
         "description": "R2: burst 5 рилсов, cooldown 45-90с (fast)",
-        "warmup": "min", "delay_min": 90, "delay_max": 240,
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
         "uniquify_level": "universal", "uniquify_covers": True,
         "first_setup_enable": False, "first_setup_avatar": False,
         "ensure_public": False,
@@ -10477,7 +11116,7 @@ PARAM_PRESETS = {
     },
     "R2_burst_10": {
         "description": "R2: burst 10 рилсов, cooldown 45-90с",
-        "warmup": "min", "delay_min": 90, "delay_max": 240,
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
         "uniquify_level": "universal", "uniquify_covers": True,
         "first_setup_enable": False, "first_setup_avatar": False,
         "ensure_public": False,
@@ -10490,7 +11129,7 @@ PARAM_PRESETS = {
     # ═══ ROUND 2: Share to feed / privacy ═══
     "R2_share_feed": {
         "description": "R2: с публикацией в основную ленту",
-        "warmup": "min", "delay_min": 90, "delay_max": 240,
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
         "uniquify_level": "universal", "uniquify_covers": True,
         "first_setup_enable": False, "first_setup_avatar": False,
         "ensure_public": False,
@@ -10498,7 +11137,7 @@ PARAM_PRESETS = {
     },
     "R2_ensure_public": {
         "description": "R2: с ensure_public проверкой",
-        "warmup": "min", "delay_min": 90, "delay_max": 240,
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
         "uniquify_level": "universal", "uniquify_covers": True,
         "first_setup_enable": False, "first_setup_avatar": False,
         "ensure_public": True,
@@ -10518,6 +11157,43 @@ PARAM_PRESETS = {
         "uniquify_level": "universal", "uniquify_covers": True,
         "first_setup_enable": False, "first_setup_avatar": False,
         "ensure_public": False,
+    },
+    # ═══ ROUND 4: финальная сетка ═══
+    "T1_no_cover_control": {
+        "description": "T1: R1-пресет повторно (подтверждение чемпиона)",
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
+        "uniquify_level": "universal", "uniquify_covers": False,
+        "first_setup_enable": True, "first_setup_avatar": True,
+        "ensure_public": False, "share_to_feed": True,
+        "_no_cover_folder": True,
+    },
+    "T2_feed_plus_storylink": {
+        "description": "T2: рилс + стори-ссылка (ретест на чистой сетке)",
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
+        "uniquify_level": "universal", "uniquify_covers": False,
+        "first_setup_enable": True, "first_setup_avatar": True,
+        "ensure_public": False, "share_to_feed": True,
+        "_no_cover_folder": True,
+        "share_reel_to_story": True, "share_delay_min": 45, "share_delay_max": 150,
+    },
+    "C1_self_engage": {
+        "description": "C1: рилс + через 15-30 мин сам-просмотр и лайк своего рилса",
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
+        "uniquify_level": "universal", "uniquify_covers": False,
+        "first_setup_enable": True, "first_setup_avatar": True,
+        "ensure_public": False, "share_to_feed": True,
+        "_no_cover_folder": True,
+        "self_engage": True, "self_like": True,
+        "self_engage_delay_min": 900, "self_engage_delay_max": 1800,
+    },
+    "T4_evening": {
+        "description": "T4: R1-пресет, залив вечером (18-22) — окно активности",
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
+        "uniquify_level": "universal", "uniquify_covers": False,
+        "first_setup_enable": True, "first_setup_avatar": True,
+        "ensure_public": False, "share_to_feed": True,
+        "_no_cover_folder": True,
+        "post_window": "18-22",
     },
 }
 
@@ -11441,7 +12117,9 @@ ORDER BY survival_pct DESC
                        "first_setup_avatar", "ensure_public", "share_to_feed",
                        "burst_enable", "burst_count", "burst_cooldown_min",
                        "burst_cooldown_max", "burst_video_mode",
-                       "burst_use_cover", "burst_stop_on_fail"):
+                       "burst_use_cover", "pre_story", "share_reel_to_story", "highlight_story",
+                       "highlight_title", "watch_reels", "watch_count", "watch_query",
+                       "follow_users", "follow_count", "follow_query", "self_engage", "self_like", "self_engage_delay_min", "self_engage_delay_max", "burst_stop_on_fail"):
                 if pk in preset:
                     params[pk] = preset[pk]
 
@@ -11484,7 +12162,8 @@ ORDER BY survival_pct DESC
             )
 
             loop = _get_loop()
-            task = loop.create_task(orch.run_batch(g, "upload_reel", params))
+            action = preset.get("_action", "upload_reel")
+            task = loop.create_task(orch.run_batch(g, action, params))
             self._active_test["groups"][-1]["task"] = task
 
             # регистрируем в mw
@@ -11674,12 +12353,14 @@ ORDER BY survival_pct DESC
         preset_names = list(PARAM_PRESETS.keys())
         # приоритетный список — самые полезные для сравнения
         priority = [
-            "R1_reel_only", "R1_no_cover", "R1_no_uniq", "R1_full_setup", "R1_burst_3",
+            "R1_reel_only", "R1_no_uniq", "R1_full_setup", "R1_burst_3",
             "R2_first_frame_only", "R2_cover_verified", "R2_ultra_slow", "R2_fast",
             "R2_uniq_heavy", "R2_uniq_compact", "R2_burst_5_slow", "R2_burst_5_fast",
             "R2_burst_10", "R2_share_feed", "R2_ensure_public",
             "R2_warmup_medium", "R2_warmup_max", "R2_cover_no_uniq",
-            "baseline", "gentle", "aggressive", "no_warmup", "no_uniq",
+            "baseline", "gentle", "aggressive", "no_warmup", "no_uniq", "T1_no_cover_control", "T2_feed_plus_storylink",
+            "C1_self_engage", "T4_evening",
+            "R1_no_cover"
         ]
         # оставляем только те что реально есть в PARAM_PRESETS
         available = [p for p in priority if p in PARAM_PRESETS]
@@ -16173,140 +16854,50 @@ for r in tops[:100]:
 
 print(f"\nВсего: {len(tops)} обложек с avg_views >= {MIN_VIEWS}")
 test_full.py
-import asyncio, sqlite3, json
-from core.geo import GeoResolver
-from core.device import DeviceProfile
-from core.session import IGSession
-from core.ig_client import IGClient, LoginError
+# fix_encoding2.py — чинит UTF-8, побитый чтением как cp1251 (v2, с C1-контролами)
+p = "core/ig_client.py"
+raw = open(p, "rb").read()
+if raw.startswith(b"\xef\xbb\xbf"):
+    raw = raw[3:]                      # убираем BOM от Set-Content
+text = raw.decode("utf-8")
 
+out = bytearray()
+unfixable = []
+for i, ch in enumerate(text):
+    o = ord(ch)
+    if o < 0x80:
+        out.append(o)                  # ASCII — как есть
+    elif 0x80 <= o <= 0x9F:
+        out.append(o)                  # C1-контролы = байты, прошедшие насквозь
+    else:
+        try:
+            out += ch.encode("cp1251")
+        except UnicodeEncodeError:
+            unfixable.append((i, hex(o), repr(ch)))
 
-async def try_one(acc):
-    try:
-        geo = GeoResolver()
-        country, tz = await geo.resolve(acc["proxy"])
-        dev = DeviceProfile.from_saved(acc)
-        sess = IGSession(dev, acc["proxy"], cookies=acc.get("cookies"))
-        cli = IGClient(sess, acc)
-        uid = await cli.login()
-        return sess, cli, uid
-    except Exception as e:
-        return None, None, None, e
+if unfixable:
+    print(f"FAIL: {len(unfixable)} символов нельзя восстановить, первые:")
+    for i, o, ch in unfixable[:10]:
+        print("  позиция", i, o, ch)
+    raise SystemExit(1)
 
+try:
+    restored = bytes(out).decode("utf-8")
+except UnicodeDecodeError as e:
+    print("FAIL: байты не собрались в валидный UTF-8:", e)
+    raise SystemExit(1)
 
-async def main():
-    c = sqlite3.connect("data/accounts.db")
-    c.row_factory = sqlite3.Row
-    rows = c.execute(
-        "SELECT * FROM accounts "
-        "WHERE cookies_json IS NOT NULL "
-        "AND proxy IS NOT NULL AND proxy != '' "
-        "AND (status IS NULL OR status NOT IN ('suspended', 'dead', 'banned')) "
-        "ORDER BY RANDOM() "     # ← случайный порядок, не подряд одни трупы
-        "LIMIT 100"
-    ).fetchall()
+# проверяем, что получился тот самый файл
+checks = ["IGClient", "upload_reel", "upload_story_photo",
+          "Публикует", "классификация", "СТОРИ"]
+missing = [c for c in checks if c not in restored]
+if missing:
+    print("FAIL: маркеры не найдены:", missing, "— файл не тронут")
+    raise SystemExit(1)
 
-    if not rows:
-        print("Нет акков в БД")
-        return
-
-    print(f"Пробую до {len(rows)} акков (в случайном порядке)...\n")
-
-    err_counts = {}
-    sess = cli = uid = None
-
-    for i, row in enumerate(rows, 1):
-        acc = dict(row)
-        acc["cookies"] = json.loads(acc["cookies_json"])
-        result = await try_one(acc)
-
-        if len(result) == 3:  # success case
-            sess, cli, uid = result
-            print(f"[{i}] ✓ ЖИВОЙ: {acc['login']} (uid={uid})")
-            break
-        else:
-            sess_r, cli_r, uid_r, err = result
-            err_type = type(err).__name__
-            err_msg = str(err)[:60]
-
-            # категоризируем
-            if "account_suspended" in err_msg or "suspended" in err_msg.lower():
-                cat = "suspended"
-            elif "407" in err_msg:
-                cat = "proxy_407"
-            elif "429" in err_msg:
-                cat = "rate_limit"
-            elif "timed out" in err_msg.lower() or "curl: (28)" in err_msg:
-                cat = "timeout"
-            elif "login_required" in err_msg:
-                cat = "cookies_dead"
-            else:
-                cat = f"other:{err_type}"
-
-            err_counts[cat] = err_counts.get(cat, 0) + 1
-            if i % 10 == 0:
-                print(f"[{i}] прогресс — {err_counts}")
-
-    if not uid:
-        print(f"\nНе нашёл живого. Итог по ошибкам:")
-        for k, v in sorted(err_counts.items(), key=lambda x: -x[1]):
-            print(f"  {k:20s} : {v}")
-        print("\nЧто делать:")
-        if err_counts.get("proxy_407", 0) > 10:
-            print("  → Прокси не работают. Проверь квоту у Byteful в личном кабинете.")
-        if err_counts.get("suspended", 0) > 20:
-            print("  → Много suspended. Прогони validate_sessions.py или чисти БД от мёртвых.")
-        return
-
-    # ─── Живой акк найден, снимаем стату ───
-    print(f"\n{'='*60}\nСнимаю статистику с {acc['login']}\n{'='*60}")
-
-    r = await sess.request("GET", f"https://i.instagram.com/api/v1/users/{uid}/info/")
-    print(f"\n/users/{uid}/info/ HTTP {r.status_code}")
-    j = r.json()
-    if "user" in j:
-        u = j["user"]
-        print(f"  username: {u.get('username')}")
-        print(f"  followers: {u.get('follower_count')}")
-        print(f"  following: {u.get('following_count')}")
-        print(f"  media_count: {u.get('media_count')}")
-
-    r = await sess.request(
-        "POST",
-        "https://i.instagram.com/api/v1/clips/user/",
-        data={"target_user_id": str(uid), "page_size": "12", "include_feed_video": "true"},
-    )
-    print(f"\n/clips/user/ HTTP {r.status_code}")
-    try:
-        j = r.json()
-    except Exception:
-        print(f"  non-JSON body: {r.text[:200]}")
-        j = {"items": []}
-    print(f"  keys: {list(j.keys())}")
-    print(f"  items: {len(j.get('items', []))}")
-    for i, item in enumerate(j.get("items", [])[:3]):
-        m = item.get("media") or item
-        print(f"    [{i}] views={m.get('play_count')} likes={m.get('like_count')}")
-
-    r = await sess.request(
-        "GET", f"https://i.instagram.com/api/v1/feed/user/{uid}/",
-        params={"count": "12"},
-    )
-    print(f"\n/feed/user/ HTTP {r.status_code}")
-    j = r.json()
-    print(f"  keys: {list(j.keys())}")
-    feed_items = j.get("items", [])
-    print(f"  items: {len(feed_items)}")
-    clips = 0
-    for item in feed_items:
-        if item.get("product_type") == "clips" or item.get("media_type") == 2:
-            clips += 1
-            print(f"    reel: views={item.get('play_count')} likes={item.get('like_count')}")
-    print(f"  из них рилсов: {clips}")
-
-    await sess.close()
-
-
-asyncio.run(main())
+open("core/ig_client.py.bak", "wb").write(raw)   # бэкап на всякий случай
+open(p, "w", encoding="utf-8", newline="").write(restored)
+print("FIXED: кодировка восстановлена, бэкап в core/ig_client.py.bak")
 validate.py
 """
 Прогоняет все аккаунты через /current_user/ и раскладывает по группам:
