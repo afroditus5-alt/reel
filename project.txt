@@ -10907,7 +10907,7 @@ from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QProgressBar, QApplication, QScrollArea,
 )
 from core.device import DeviceProfile, device_for
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSettings
 from PyQt6.QtGui import QColor, QFont
 import asyncio
 import json
@@ -11195,6 +11195,103 @@ PARAM_PRESETS = {
         "_no_cover_folder": True,
         "post_window": "18-22",
     },
+    # ═══ ROUND T3: ВЫЖИВАЕМОСТЬ на базе чемпиона T2 ═══
+    # Правило: T2_CTRL обязателен в каждом раунде, варианты меняют ОДНО.
+    "T2_CTRL": {
+        "description": "КОНТРОЛЬ: чемпион T2 без изменений. ОБЯЗАТЕЛЕН в каждом раунде",
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
+        "uniquify_level": "universal", "uniquify_covers": False,
+        "first_setup_enable": True, "first_setup_avatar": True,
+        "ensure_public": False, "share_to_feed": True,
+        "_no_cover_folder": True,
+        "share_reel_to_story": True, "share_delay_min": 45, "share_delay_max": 150,
+    },
+    "T3_no_storylink": {
+        "description": "T3: T2 БЕЗ стори-репоста (только feed) — убивает ли стори акков на дистанции",
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
+        "uniquify_level": "universal", "uniquify_covers": False,
+        "first_setup_enable": True, "first_setup_avatar": True,
+        "ensure_public": False, "share_to_feed": True,
+        "_no_cover_folder": True,
+        "share_reel_to_story": False,
+    },
+    "T3_watch": {
+        "description": "T3: T2 + просмотр 6-10 чужих рилсов в сессии до залива (человеко-подобие)",
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
+        "uniquify_level": "universal", "uniquify_covers": False,
+        "first_setup_enable": True, "first_setup_avatar": True,
+        "ensure_public": False, "share_to_feed": True,
+        "_no_cover_folder": True,
+        "share_reel_to_story": True, "share_delay_min": 45, "share_delay_max": 150,
+        "watch_reels": True, "watch_count": 8,
+    },
+    "T3_pre_story": {
+        "description": "T3: T2 + сторь ДО залива рилса (акк живой до первого поста)",
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
+        "uniquify_level": "universal", "uniquify_covers": False,
+        "first_setup_enable": True, "first_setup_avatar": True,
+        "ensure_public": False, "share_to_feed": True,
+        "_no_cover_folder": True,
+        "share_reel_to_story": True, "share_delay_min": 45, "share_delay_max": 150,
+        "pre_story": True,
+    },
+    "T3_highlight": {
+        "description": "T3: T2 + стори-репост сохраняется в хайлайт (сигнал реального акка)",
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
+        "uniquify_level": "universal", "uniquify_covers": False,
+        "first_setup_enable": True, "first_setup_avatar": True,
+        "ensure_public": False, "share_to_feed": True,
+        "_no_cover_folder": True,
+        "share_reel_to_story": True, "share_delay_min": 45, "share_delay_max": 150,
+        "highlight_story": True,
+    },
+    "T3_no_setup": {
+        "description": "T3: T2 БЕЗ bio/avatar при заливе — если акки fresh, setup их палит",
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
+        "uniquify_level": "universal", "uniquify_covers": False,
+        "first_setup_enable": False, "first_setup_avatar": False,
+        "ensure_public": False, "share_to_feed": True,
+        "_no_cover_folder": True,
+        "share_reel_to_story": True, "share_delay_min": 45, "share_delay_max": 150,
+    },
+    "T3_slow_pace": {
+        "description": "T3: T2 + темп 2-5 мин между акками (сейчас 20-60 сек)",
+        "warmup": "min", "delay_min": 120, "delay_max": 300,
+        "uniquify_level": "universal", "uniquify_covers": False,
+        "first_setup_enable": True, "first_setup_avatar": True,
+        "ensure_public": False, "share_to_feed": True,
+        "_no_cover_folder": True,
+        "share_reel_to_story": True, "share_delay_min": 45, "share_delay_max": 150,
+    },
+    "T3_share_later": {
+        "description": "T3: T2 + стори через 15-40 МИН после залива, не сразу",
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
+        "uniquify_level": "universal", "uniquify_covers": False,
+        "first_setup_enable": True, "first_setup_avatar": True,
+        "ensure_public": False, "share_to_feed": True,
+        "_no_cover_folder": True,
+        "share_reel_to_story": True, "share_delay_min": 900, "share_delay_max": 2400,
+    },
+    "T3_warm_medium": {
+        "description": "T3: T2 + medium warmup (больше запросов после логина, живее сессия)",
+        "warmup": "medium", "delay_min": 20, "delay_max": 60,
+        "uniquify_level": "universal", "uniquify_covers": False,
+        "first_setup_enable": True, "first_setup_avatar": True,
+        "ensure_public": False, "share_to_feed": True,
+        "_no_cover_folder": True,
+        "share_reel_to_story": True, "share_delay_min": 45, "share_delay_max": 150,
+    },
+    "T3_follow_light": {
+        "description": "T3: T2 + подписки на 2-3 акков ниши (сильный сигнал человека)",
+        "warmup": "min", "delay_min": 20, "delay_max": 60,
+        "uniquify_level": "universal", "uniquify_covers": False,
+        "first_setup_enable": True, "first_setup_avatar": True,
+        "ensure_public": False, "share_to_feed": True,
+        "_no_cover_folder": True,
+        "share_reel_to_story": True, "share_delay_min": 45, "share_delay_max": 150,
+        "follow_users": True, "follow_count": 3,
+    },
+    
 }
 
 
@@ -11207,6 +11304,13 @@ class TestLabPanel(QWidget):
         super().__init__()
         self.db = db
         self._active_test = None   # {test_id, groups: [{variant, accs, task}]}
+
+        # ── persistence: настройки Test Lab живут между запусками ──
+        self._qsettings = QSettings("ReelsForge", "TestLab")
+        self._save_timer = QTimer(self)      # debounce автосохранения
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(400)
+        self._save_timer.timeout.connect(self._save_tl_settings)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(4, 4, 4, 4)
@@ -11231,8 +11335,11 @@ class TestLabPanel(QWidget):
         self.tabs.addTab(self._build_views_tab(),    "5️⃣  Views Report")   # ← НОВОЕ
         self.tabs.addTab(self._build_sql_tab(), "🗄 SQL Console")
 
-
         v.addWidget(self.tabs)
+
+        # восстановить настройки + включить автосохранение
+        self._load_tl_settings()
+        self._hook_autosave()
 
     # ═══════════════════════════════════════════════════════════
     #            ВКЛАДКА 1: Настройка теста
@@ -11270,12 +11377,22 @@ class TestLabPanel(QWidget):
         fl1.addRow("Пачка импорта:", self.pool_batch)
 
         self.pool_count = QSpinBox()
-        self.pool_count.setRange(10, 10000); self.pool_count.setValue(100)
+        self.pool_count.setRange(1, 10000); self.pool_count.setValue(100)
         fl1.addRow("Всего акков в тесте:", self.pool_count)
 
         self.pool_only_with_proxy = QCheckBox("Только с назначенным прокси")
         self.pool_only_with_proxy.setChecked(True)
         fl1.addRow(self.pool_only_with_proxy)
+
+        # ── SOLO: залив на конкретные логины, фильтры пула игнорируются ──
+        self.solo_logins = QLineEdit()
+        self.solo_logins.setPlaceholderText(
+            "user1, user2, user3 — соло-залив ТОЛЬКО на эти акки (пусто = обычный пул)")
+        self.solo_logins.setToolTip(
+            "Solo-режим: логины через запятую/пробел/точку с запятой.\n"
+            "Платформа/статус/пачка/кол-во игнорируются, порядок твой.\n"
+            "Фильтр прокси и автопривязка работают как обычно.")
+        fl1.addRow("🎯 Solo залив:", self.solo_logins)
 
         self.btn_preview_pool = QPushButton("👀 Показать сколько подойдёт")
         self.btn_preview_pool.clicked.connect(self._preview_pool)
@@ -11293,12 +11410,12 @@ class TestLabPanel(QWidget):
         fl2 = QFormLayout(gb2)
 
         self.group_count = QSpinBox()
-        self.group_count.setRange(2, 20)
+        self.group_count.setRange(1, 20)
         self.group_count.setValue(5)
         self.group_count.valueChanged.connect(self._rebuild_group_selectors)
         self.group_count.valueChanged.connect(self._update_group_hint)
         self.pool_count.valueChanged.connect(self._update_group_hint)
-        fl2.addRow("Количество групп (2-20):", self.group_count)
+        fl2.addRow("Количество групп (1-20):", self.group_count)
 
         # подсказка: сколько акков в группе + оценка статистической значимости
         self.group_hint = QLabel("")
@@ -11502,6 +11619,9 @@ class TestLabPanel(QWidget):
                     lambda name, lbl=desc: lbl.setText(
                         PARAM_PRESETS.get(name, {}).get("description", "")))
 
+            # автосейв выбранного пресета группы
+            preset.currentTextChanged.connect(lambda *_: self._schedule_save())
+
             self.groups_layout.addWidget(gb)
             self._group_selectors.append({
                 "letter": letter,
@@ -11603,8 +11723,10 @@ class TestLabPanel(QWidget):
             by_status[s] = by_status.get(s, 0) + 1
 
         with_proxy = sum(1 for a in accs if a.get("proxy"))
-        n = self.pool_count.value()
-        actual = min(n, len(accs))
+        if self.solo_logins.text().strip():
+            actual = len(accs)      # solo: берём ВСЕ указанные логины
+        else:
+            actual = min(self.pool_count.value(), len(accs))
 
         self.lbl_pool_preview.setText(
             f"✅ Подходит: {len(accs)} акков "
@@ -11621,6 +11743,28 @@ class TestLabPanel(QWidget):
         all_accs = self.db.list_accounts()
         n0 = len(all_accs)
         print(f"[TestLab] pool: start with {n0} accounts total")
+
+        # ── SOLO: конкретные логины, фильтры ниже игнорируются ──
+        solo_raw = self.solo_logins.text().strip() if hasattr(self, "solo_logins") else ""
+        if solo_raw:
+            wanted = [x.strip() for x in
+                      solo_raw.replace(";", ",").replace(" ", ",").split(",")
+                      if x.strip()]
+            by_login = {a["login"]: a for a in all_accs}
+            found, missing = [], []
+            for name in wanted:
+                if name in by_login:
+                    found.append(by_login[name])
+                else:
+                    missing.append(name)
+            if missing:
+                print(f"[TestLab] solo: НЕ найдены в БД: {', '.join(missing)}")
+            if self.pool_only_with_proxy.isChecked():
+                before = len(found)
+                found = [a for a in found if a.get("proxy")]
+                print(f"[TestLab] solo: после фильтра прокси: {len(found)} (было {before})")
+            print(f"[TestLab] === SOLO: {len(found)}/{len(wanted)} логинов готовы ===")
+            return found
 
         # ── платформа ──
         plat_idx = self.pool_platform.currentIndex()
@@ -11936,21 +12080,6 @@ ORDER BY survival_pct DESC
                     row.append(it.text() if it else "")
                 w.writerow(row)
         QMessageBox.information(self, "OK", f"Сохранено:\n{path}")
-        by_plat = {}
-        for a in accs:
-            p = a.get("platform", "?")
-            by_plat[p] = by_plat.get(p, 0) + 1
-
-        with_proxy = sum(1 for a in accs if a.get("proxy"))
-        n = self.pool_count.value()
-        actual = min(n, len(accs))
-
-        self.lbl_pool_preview.setText(
-            f"✅ Подходит: {len(accs)} акков "
-            f"(из них с прокси: {with_proxy}). "
-            f"В тест возьмём: {actual}. "
-            f"Распределение: {', '.join(f'{p}={c}' for p, c in by_plat.items())}"
-        )
     def _copy_sql_selection(self):
         """Копирует выделенные ячейки как TSV в буфер."""
         sel = self.sql_result_table.selectedIndexes()
@@ -11999,11 +12128,25 @@ ORDER BY survival_pct DESC
         except Exception:
             pass
     # ═══════════════════════════════════════════════════════════
+    def _test_running(self) -> bool:
+        """True — если хоть одна группа текущего теста ещё не завершилась."""
+        if not self._active_test:
+            return False
+        for g in self._active_test.get("groups", []):
+            t = g.get("task")
+            if t is not None and not t.done():
+                return True
+        return False
+
     def _start_test(self):
-        if self._active_test:
+        # ── фикс стоп-бага: смотрим на живость task'ов, а не на факт _active_test.
+        # после Stop таски = done → новый тест разрешён сразу.
+        if self._test_running():
             QMessageBox.warning(self, "!",
-                "Тест уже идёт. Дождись окончания или останови через Stop в тулбаре.")
+                "Тест ещё работает (есть незавершённые группы).\n"
+                "Дождись, нажми Stop в тулбаре или '🧹 Сброс теста' на Live-дашборде.")
             return
+        # старый тест завершён/остановлен — _active_test перезапишется ниже
 
         mw = self._get_mw()
         if not mw:
@@ -12016,12 +12159,15 @@ ORDER BY survival_pct DESC
 
         pool = self._select_pool()
         if not pool:
-            QMessageBox.warning(self, "!", "Пул пустой. Проверь фильтры.")
+            QMessageBox.warning(self, "!", "Пул пустой. Проверь фильтры или solo-логины.")
             return
 
-        n = self.pool_count.value()
-        random.shuffle(pool)
-        pool = pool[:n]
+        # ── solo: НЕ шафлим и НЕ режем по кол-ву — берём все указанные ──
+        solo_mode = bool(self.solo_logins.text().strip())
+        if not solo_mode:
+            n = self.pool_count.value()
+            random.shuffle(pool)
+            pool = pool[:n]
 
         # ── разбиваем на группы РОВНО ──
         k = self.group_count.value()
@@ -12119,7 +12265,9 @@ ORDER BY survival_pct DESC
                        "burst_cooldown_max", "burst_video_mode",
                        "burst_use_cover", "pre_story", "share_reel_to_story", "highlight_story",
                        "highlight_title", "watch_reels", "watch_count", "watch_query",
-                       "follow_users", "follow_count", "follow_query", "self_engage", "self_like", "self_engage_delay_min", "self_engage_delay_max", "burst_stop_on_fail"):
+                       "follow_users", "follow_count", "follow_query", "self_engage", "self_like",
+                       "self_engage_delay_min", "self_engage_delay_max", "burst_stop_on_fail",
+                       "post_window", "share_delay_min", "share_delay_max"):
                 if pk in preset:
                     params[pk] = preset[pk]
 
@@ -12353,6 +12501,9 @@ ORDER BY survival_pct DESC
         preset_names = list(PARAM_PRESETS.keys())
         # приоритетный список — самые полезные для сравнения
         priority = [
+            "T2_CTRL", "T3_no_storylink", "T3_watch", "T3_pre_story",
+            "T3_highlight", "T3_no_setup", "T3_slow_pace", "T3_share_later",
+            "T3_warm_medium", "T3_follow_light",
             "R1_reel_only", "R1_no_uniq", "R1_full_setup", "R1_burst_3",
             "R2_first_frame_only", "R2_cover_verified", "R2_ultra_slow", "R2_fast",
             "R2_uniq_heavy", "R2_uniq_compact", "R2_burst_5_slow", "R2_burst_5_fast",
@@ -12460,6 +12611,12 @@ ORDER BY survival_pct DESC
         self.btn_refresh_live = QPushButton("🔄 Обновить")
         self.btn_refresh_live.clicked.connect(self._refresh_live)
         h.addWidget(self.btn_refresh_live)
+        self.btn_reset_test = QPushButton("🧹 Сброс теста")
+        self.btn_reset_test.setToolTip(
+            "Принудительно разрешает запуск нового теста.\n"
+            "Если после Stop софт всё ещё считает что тест идёт — жми сюда.")
+        self.btn_reset_test.clicked.connect(self._reset_active_test)
+        h.addWidget(self.btn_reset_test)
         self.lbl_live_test_name = QLabel("(тест не запущен)")
         self.lbl_live_test_name.setStyleSheet("font-weight:600;")
         h.addWidget(self.lbl_live_test_name)
@@ -12488,6 +12645,7 @@ ORDER BY survival_pct DESC
     def _refresh_live(self):
         if not self._active_test:
             self.lbl_live_test_name.setText("(тест не запущен)")
+            self.tbl_live.setRowCount(0)
             return
 
         self.lbl_live_test_name.setText(
@@ -13078,7 +13236,114 @@ ORDER BY survival_pct DESC
                 return p
             p = p.parent()
         return None
-        
+    def _reset_active_test(self):
+        """Жёсткий сброс: разрешить новый тест даже если state залип."""
+        if self._test_running():
+            reply = QMessageBox.question(
+                self, "Тест работает",
+                "Группы ещё не завершились. Отменить их принудительно?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            for g in self._active_test["groups"]:
+                t = g.get("task")
+                if t and not t.done():
+                    t.cancel()
+        self._active_test = None
+        self._refresh_live()
+        mw = self._get_mw()
+        if mw:
+            mw._log("info", "[TestLab] Состояние теста сброшено — можно запускать новый.")
+
+    # ═══════════════════════════════════════════════════════════
+    #           PERSISTENCE: save/load настроек Test Lab
+    # ═══════════════════════════════════════════════════════════
+    def _hook_autosave(self):
+        self.pool_platform.currentIndexChanged.connect(self._schedule_save)
+        self.pool_status.currentIndexChanged.connect(self._schedule_save)
+        self.pool_batch.currentTextChanged.connect(self._schedule_save)
+        self.pool_count.valueChanged.connect(self._schedule_save)
+        self.pool_only_with_proxy.stateChanged.connect(self._schedule_save)
+        self.solo_logins.textChanged.connect(self._schedule_save)
+        self.group_count.valueChanged.connect(self._schedule_save)
+        self.tl_video_folder.textChanged.connect(self._schedule_save)
+        self.tl_cover_folder.textChanged.connect(self._schedule_save)
+        self.tl_avatar_folder.textChanged.connect(self._schedule_save)
+        self.tl_never_consume.stateChanged.connect(self._schedule_save)
+        self.tl_caption.textChanged.connect(self._schedule_save)
+        self.tl_threads.valueChanged.connect(self._schedule_save)
+
+    def _schedule_save(self, *args):
+        self._save_timer.start()   # пишем через 400мс после последнего изменения
+
+    def _save_tl_settings(self):
+        try:
+            s = self._qsettings
+            s.setValue("pool_platform_idx", self.pool_platform.currentIndex())
+            s.setValue("pool_status_idx", self.pool_status.currentIndex())
+            s.setValue("pool_batch_text", self.pool_batch.currentText())
+            s.setValue("pool_count", self.pool_count.value())
+            s.setValue("pool_only_with_proxy", self.pool_only_with_proxy.isChecked())
+            s.setValue("solo_logins", self.solo_logins.text())
+            s.setValue("group_count", self.group_count.value())
+            s.setValue("video_folder", self.tl_video_folder.text())
+            s.setValue("cover_folder", self.tl_cover_folder.text())
+            s.setValue("avatar_folder", self.tl_avatar_folder.text())
+            s.setValue("never_consume", self.tl_never_consume.isChecked())
+            s.setValue("caption", self.tl_caption.toPlainText())
+            s.setValue("threads", self.tl_threads.value())
+            # выбранные пресеты по группам
+            s.beginWriteArray("group_presets")
+            for i, sel in enumerate(self._group_selectors):
+                s.setArrayIndex(i)
+                s.setValue("preset", sel["preset_combo"].currentText())
+            s.endArray()
+            s.sync()
+        except Exception as e:
+            print(f"[TestLab] save settings: {e}")
+
+    def _load_tl_settings(self):
+        try:
+            s = self._qsettings
+            if s.contains("pool_platform_idx"):
+                self.pool_platform.setCurrentIndex(int(s.value("pool_platform_idx")))
+            if s.contains("pool_status_idx"):
+                self.pool_status.setCurrentIndex(int(s.value("pool_status_idx")))
+            b = str(s.value("pool_batch_text", "") or "")
+            if b:
+                idx = self.pool_batch.findText(b)
+                if idx >= 0:
+                    self.pool_batch.setCurrentIndex(idx)
+            if s.contains("pool_count"):
+                self.pool_count.setValue(int(s.value("pool_count")))
+            self.pool_only_with_proxy.setChecked(
+                s.value("pool_only_with_proxy", True, type=bool))
+            self.solo_logins.setText(str(s.value("solo_logins", "") or ""))
+            if s.contains("group_count"):
+                self.group_count.setValue(int(s.value("group_count")))
+            self.tl_video_folder.setText(str(s.value("video_folder", "") or ""))
+            self.tl_cover_folder.setText(str(s.value("cover_folder", "") or ""))
+            self.tl_avatar_folder.setText(str(s.value("avatar_folder", "") or ""))
+            self.tl_never_consume.setChecked(
+                s.value("never_consume", True, type=bool))
+            self.tl_caption.setPlainText(str(s.value("caption", "") or ""))
+            if s.contains("threads"):
+                self.tl_threads.setValue(int(s.value("threads")))
+
+            # пресеты групп (group_count уже отработал -> комбики существуют)
+            n = s.beginReadArray("group_presets")
+            if n:
+                for i in range(min(n, len(self._group_selectors))):
+                    s.setArrayIndex(i)
+                    name = str(s.value("preset", "") or "")
+                    if name:
+                        cb = self._group_selectors[i]["preset_combo"]
+                        idx = cb.findText(name)
+                        if idx >= 0:
+                            cb.setCurrentIndex(idx)
+            s.endArray()
+        except Exception as e:
+            print(f"[TestLab] load settings: {e}")
     # ═══════════════════════════════════════════════════════════
     #        ВКЛАДКА 5: Views Report — просмотры выживших
     # ═══════════════════════════════════════════════════════════
